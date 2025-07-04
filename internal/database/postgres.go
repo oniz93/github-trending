@@ -1,0 +1,182 @@
+package database
+
+import (
+	"database/sql"
+	"fmt"
+	"log"
+	"strings"
+	"time"
+
+	_ "github.com/lib/pq"
+	"github.com/teomiscia/github-trending/internal/models"
+)
+
+// PostgresConnection holds the database connection.
+type PostgresConnection struct {
+	DB *sql.DB
+}
+
+// NewPostgresConnection creates a new connection to the PostgreSQL database.
+func NewPostgresConnection(host, user, password, dbname string) (*PostgresConnection, error) {
+	connStr := fmt.Sprintf("host=%s user=%s password=%s dbname=%s sslmode=disable", host, user, password, dbname)
+	db, err := sql.Open("postgres", connStr)
+	if err != nil {
+		return nil, err
+	}
+
+	if err = db.Ping(); err != nil {
+		return nil, err
+	}
+
+	return &PostgresConnection{DB: db}, nil
+}
+
+// TrackRepositoryView inserts a record of a repository view into the database.
+func (pc *PostgresConnection) TrackRepositoryView(sessionID string, repositoryID int64) error {
+	_, err := pc.DB.Exec("INSERT INTO repository_views (session_id, repository_id) VALUES ($1, $2)", sessionID, repositoryID)
+	return err
+}
+
+// GetTrendingRepositoryIDs retrieves a list of trending repository IDs, filtered by languages and tags.
+func (pc *PostgresConnection) GetTrendingRepositoryIDs(languages []string, tags []string) ([]int64, error) {
+	query := "SELECT id FROM repositories"
+	args := []interface{}{}
+	whereClauses := []string{}
+
+	if len(languages) > 0 {
+		whereClauses = append(whereClauses, "id IN (SELECT repository_id FROM repository_languages WHERE language_id IN (SELECT id FROM languages WHERE name = ANY($1)))")
+		args = append(args, languages)
+	}
+
+	if len(tags) > 0 {
+		whereClauses = append(whereClauses, "id IN (SELECT repository_id FROM repository_tags WHERE tag_id IN (SELECT id FROM tags WHERE name = ANY($2)))")
+		args = append(args, tags)
+	}
+
+	if len(whereClauses) > 0 {
+		query += " WHERE " + strings.Join(whereClauses, " AND ")
+	}
+
+	query += " ORDER BY last_crawled_at DESC LIMIT 100"
+
+	rows, err := pc.DB.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+
+	return ids, nil
+}
+
+// GetLastCrawlTime retrieves the last time a repository was crawled.
+func (pc *PostgresConnection) GetLastCrawlTime(repoID int) (time.Time, error) {
+	var lastCrawledAt time.Time
+	err := pc.DB.QueryRow("SELECT last_crawled_at FROM repositories WHERE id = $1", repoID).Scan(&lastCrawledAt)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return time.Time{}, nil // Not yet crawled
+		}
+		return time.Time{}, err
+	}
+	return lastCrawledAt, nil
+}
+
+// InsertRepository inserts a repository into the database.
+func (pc *PostgresConnection) InsertRepository(repo models.Repository, lastCrawledAt time.Time) error {
+	tx, err := pc.DB.Begin()
+	if err != nil {
+		return err
+	}
+
+	// Insert owner
+	_, err = tx.Exec(`
+		INSERT INTO owners (id, login, avatar_url, html_url, type)
+		VALUES ($1, $2, $3, $4, $5)
+		ON CONFLICT (id) DO NOTHING
+	`, repo.Owner.ID, repo.Owner.Login, repo.Owner.AvatarURL, repo.Owner.HTMLURL, repo.Owner.Type)
+	if err != nil {
+		log.Printf("Failed to insert owner: %v", err)
+		tx.Rollback()
+		return err
+	}
+
+	// Insert license
+	if repo.License.Key != "" {
+		_, err = tx.Exec(`
+			INSERT INTO licenses (key, name, spdx_id, url, node_id)
+			VALUES ($1, $2, $3, $4, $5)
+			ON CONFLICT (key) DO UPDATE SET
+				name = $2, spdx_id = $3, url = $4, node_id = $5
+		`, repo.License.Key, repo.License.Name, repo.License.SpdxID, repo.License.URL, repo.License.NodeID)
+		if err != nil {
+			log.Printf("Failed to insert license: %v", err)
+			tx.Rollback()
+			return err
+		}
+	}
+
+	// Insert repository
+	_, err = tx.Exec(`
+		INSERT INTO repositories (id, name, full_name, owner_id, description, html_url, homepage, default_branch, license_key, readme_url, created_at, is_fork, is_template, is_archived, is_disabled, last_crawled_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+		ON CONFLICT (id) DO UPDATE SET
+			name = $2, full_name = $3, owner_id = $4, description = $5, html_url = $6, homepage = $7, default_branch = $8, license_key = $9, readme_url = $10, created_at = $11, is_fork = $12, is_template = $13, is_archived = $14, is_disabled = $15, last_crawled_at = $16
+	`, repo.ID, repo.Name, repo.FullName, repo.Owner.ID, repo.Description, repo.HTMLURL, repo.Homepage, repo.DefaultBranch, func() interface{} {
+		if repo.License.Key == "" {
+			return nil
+		}
+		return repo.License.Key
+	}(), repo.ReadmeURL, repo.CreatedAt, repo.Fork, repo.IsTemplate, repo.Archived, repo.Disabled, lastCrawledAt)
+	if err != nil {
+		log.Printf("Failed to insert repository: %v", err)
+		tx.Rollback()
+		return err
+	}
+
+	// Insert tags
+	for _, tagName := range repo.Tags {
+		var tagID int
+		err = tx.QueryRow("INSERT INTO tags (name) VALUES ($1) ON CONFLICT (name) DO UPDATE SET name = $1 RETURNING id", tagName).Scan(&tagID)
+		if err != nil {
+			log.Printf("Failed to insert tag: %v", err)
+			tx.Rollback()
+			return err
+		}
+
+		_, err = tx.Exec("INSERT INTO repository_tags (repository_id, tag_id) VALUES ($1, $2) ON CONFLICT DO NOTHING", repo.ID, tagID)
+		if err != nil {
+			log.Printf("Failed to insert repository_tag: %v", err)
+			tx.Rollback()
+			return err
+		}
+	}
+
+	// Insert languages
+	for langName, size := range repo.Languages {
+		var langID int
+		err = tx.QueryRow("INSERT INTO languages (name) VALUES ($1) ON CONFLICT (name) DO UPDATE SET name = $1 RETURNING id", langName).Scan(&langID)
+		if err != nil {
+			log.Printf("Failed to insert language: %v", err)
+			tx.Rollback()
+			return err
+		}
+
+		_, err = tx.Exec("INSERT INTO repository_languages (repository_id, language_id, size) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING", repo.ID, langID, size)
+		if err != nil {
+			log.Printf("Failed to insert repository_language: %v", err)
+			tx.Rollback()
+			return err
+		}
+	}
+
+	return tx.Commit()
+}

@@ -1,0 +1,6 @@
+CREATE TABLE IF NOT EXISTS repository_views (
+    id SERIAL PRIMARY KEY,
+    session_id VARCHAR(255) NOT NULL,
+    repository_id BIGINT NOT NULL,
+    viewed_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);

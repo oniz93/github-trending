@@ -1,0 +1,31 @@
+package main
+
+import (
+	"log"
+
+	"github.com/teomiscia/github-trending/internal/api"
+	"github.com/teomiscia/github-trending/internal/config"
+	"github.com/teomiscia/github-trending/internal/database"
+)
+
+func main() {
+	cfg, err := config.Load()
+	if err != nil {
+		log.Fatalf("Failed to load configuration: %v", err)
+	}
+
+	redisClient, err := database.NewRedisClient(cfg.RedisHost, cfg.RedisPort, cfg.RedisPassword)
+	if err != nil {
+		log.Fatalf("Failed to connect to Redis: %v", err)
+	}
+
+	postgresConnection, err := database.NewPostgresConnection(cfg.PostgresHost, cfg.PostgresUser, cfg.PostgresPassword, cfg.PostgresDB)
+	if err != nil {
+		log.Fatalf("Failed to connect to Postgres: %v", err)
+	}
+
+	server := api.NewServer(redisClient, postgresConnection)
+
+	log.Println("API Server started. Listening on :8080")
+	log.Fatal(server.Run(":8080"))
+}
