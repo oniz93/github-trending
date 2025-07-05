@@ -12,6 +12,7 @@ type Config struct {
 	PostgresUser       string
 	PostgresPassword   string
 	PostgresDB         string
+	MinioEndpoint      string
 	MinioRootUser      string
 	MinioRootPassword  string
 	ClickHouseHost     string
@@ -22,6 +23,10 @@ type Config struct {
 	RedisHost          string
 	RedisPort          string
 	RedisPassword      string
+	MilvusHost         string
+	MilvusPort         string
+	LastUpdateCut      string
+	SimilarityListSize string
 }
 
 // Load loads configuration from the environment.
@@ -35,6 +40,7 @@ func Load() (*Config, error) {
 		PostgresUser:       os.Getenv("POSTGRES_USER"),
 		PostgresPassword:   os.Getenv("POSTGRES_PASSWORD"),
 		PostgresDB:         os.Getenv("POSTGRES_DB"),
+		MinioEndpoint:      os.Getenv("MINIO_ENDPOINT"),
 		MinioRootUser:      os.Getenv("MINIO_ROOT_USER"),
 		MinioRootPassword:  os.Getenv("MINIO_ROOT_PASSWORD"),
 		ClickHouseHost:     os.Getenv("CLICKHOUSE_HOST"),
@@ -45,6 +51,10 @@ func Load() (*Config, error) {
 		RedisHost:          os.Getenv("REDIS_HOST"),
 		RedisPort:          os.Getenv("REDIS_PORT"),
 		RedisPassword:      os.Getenv("REDIS_PASSWORD"),
+		MilvusHost:         os.Getenv("MILVUS_HOST"),
+		MilvusPort:         os.Getenv("MILVUS_PORT"),
+		LastUpdateCut:      os.Getenv("LAST_UPDATE_CUT"),
+		SimilarityListSize: os.Getenv("SIMILARITY_LIST_SIZE"),
 	}
 
 	if os.Getenv("LOCAL_ENV") == "true" {

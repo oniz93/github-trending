@@ -11,6 +11,8 @@ The system is composed of five core microservices, each with a distinct responsi
 -   **`crawler-service`**: Fetches raw data from the GitHub API for specified repositories.
 -   **`processor-service`**: Parses, cleans, and saves raw data to various databases.
 -   **`api-server`**: Provides a public-facing API for querying trending data.
+-   **`embedding-service`**: Converts repository READMEs into semantic vectors (embeddings) and stores them in Milvus.
+-   **`similarity-engine-service`**: Pre-calculates and stores repository similarity lists in Redis for fast retrieval.
 
 For a detailed explanation of the architecture and data flow, please refer to [GEMINI.md](./GEMINI.md).
 
@@ -40,7 +42,7 @@ This project uses Docker Compose for a streamlined local development environment
     Create a `.env` file in the root of your project to store environment variables common to all services. An example is provided in [GEMINI.md](./GEMINI.md).
 
 4.  **Build and Run Services:**
-    The `docker-compose.yml` file defines all the necessary infrastructure (RabbitMQ, PostgreSQL, MinIO, ClickHouse, Redis) and the Go microservices. To build the Go services and start all containers, run:
+    The `docker-compose.yml` file defines all the necessary infrastructure (RabbitMQ, PostgreSQL, MinIO, ClickHouse, Redis, Milvus) and the Go microservices. To build the Go services and start all containers, run:
     ```bash
     docker-compose up --build
     ```
@@ -55,6 +57,7 @@ Once the services are running, you can access the following:
 -   **PostgreSQL**: Connect to `localhost:5432` (User: `user`, Password: `password`, Database: `github_meta`)
 -   **ClickHouse**: HTTP interface at `http://localhost:8123`, Native client interface at `localhost:9009` (User: `clickhouse`, Password: `clickhouse`)
 -   **Redis**: Connect to `localhost:6379`
+-   **Milvus**: Connect to `localhost:19530`
 -   **API Server**: `http://localhost:8080`
 
 ## API Endpoints
@@ -76,8 +79,10 @@ github-trending/
 │   ├── api/
 │   ├── crawler/
 │   ├── discovery/
+│   ├── embedding-service/
 │   ├── processor/
-│   └── scheduler/
+│   ├── scheduler/
+│   └── similarity-engine-service/
 ├── internal/        # Shared internal Go packages (config, database, github client, messaging, models)
 │   ├── config/
 │   ├── database/
@@ -92,3 +97,4 @@ For a more in-depth look at the project structure and Go code design, please ref
 ## Contributing
 
 (Optional: Add guidelines for contributing, e.g., code style, testing, pull request process.)
+

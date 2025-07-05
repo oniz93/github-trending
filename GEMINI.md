@@ -6,17 +6,21 @@ This guide will provide a complete blueprint for your local development setup on
 
 Your intuition is spot on. We need to break this system down into small, independent services that each do one thing well. This makes the system easier to develop, test, debug, and scale. We'll add a couple more services to your initial list for a cleaner separation of concerns.
 
-Here are the five core microservices we will build:
+Here are the seven core microservices we will build:
 
 1.  **`discovery-service`**: Its only job is to find *new* repositories to track. It will run periodically (e.g., once a day), use the GitHub Search API to find repositories matching our criteria (e.g., `stars:>50`), and push their URLs to a queue for the crawlers.
 2.  **`scheduler-service`**: Its only job is to schedule *refreshes* for repositories we already track. It will run continuously, query our own database for repositories that haven't been updated recently, and push their URLs to the same queue as the discovery service.
 3.  **`crawler-service`**: This is a simple worker. It pulls a repository URL from the queue, fetches all the necessary data from the GitHub API (stats, languages, README URL, etc.), and pushes the raw, unprocessed data to another queue.
-4.  **`processor-service`**: This is another worker. It pulls raw data from the crawler's output queue, parses and cleans it, then saves it to the appropriate databases (time-series stats to ClickHouse, metadata to PostgreSQL, and READMEs to MinIO).
-5.  **`api-server`**: This is the public-facing service. It listens for HTTP requests from your web application, queries the databases to calculate trending data, and returns it as a clean JSON response.
+4.  **`processor-service`**: This is another worker. It pulls raw data from the crawler's output queue, parses and cleans it, then saves it to the appropriate databases (time-series stats to ClickHouse, metadata to PostgreSQL, and READMEs to MinIO). It also triggers the `embedding-service` when a new README is processed.
+5.  **`embedding-service`**: This service consumes messages about new READMEs, downloads their content (from MinIO or directly from GitHub), generates semantic embeddings using a pre-trained model, and stores these vectors in Milvus (our vector database).
+6.  **`similarity-engine-service`**: This service runs periodically, fetches repository embeddings from Milvus, calculates similarity scores between repositories, and stores pre-computed similarity lists in Redis for fast retrieval by the API server.
+7.  **`api-server`**: This is the public-facing service. It listens for HTTP requests from your web application, queries the databases to calculate trending data, and returns it as a clean JSON response. It now also provides personalized recommendations based on user interaction history, leveraging pre-computed similarity lists from Redis.
 
 This design creates a robust, one-way data flow:
 
 `Discovery/Scheduler` -> `Crawl Queue` -> `Crawler` -> `Process Queue` -> `Processor` -> `Databases` <- `API Server`
+                                                                                                `Processor` -> `Embeddings Queue` -> `Embedding Service` -> `Milvus`
+                                                                                                `Similarity Engine` -> `Milvus` -> `Redis`
 
 ### Part 2: Local Development Setup with Docker Compose
 
@@ -36,6 +40,8 @@ mkdir scheduler-service
 mkdir crawler-service
 mkdir processor-service
 mkdir api-server
+mkdir embedding-service
+mkdir similarity-engine-service
 
 # Create a directory for shared Go code
 mkdir -p internal/database
@@ -67,6 +73,7 @@ POSTGRES_DB=github_meta
 # MinIO Credentials
 MINIO_ROOT_USER=minioadmin
 MINIO_ROOT_PASSWORD=minioadmin
+MINIO_ENDPOINT=minio:9000
 
 # Clickhouse Credentials
 CLICKHOUSE_HOST=clickhouse
@@ -79,6 +86,14 @@ CLICKHOUSE_DB=default
 REDIS_HOST=redis_cache
 REDIS_PORT=6379
 REDIS_PASSWORD=
+
+# Milvus Credentials
+MILVUS_HOST=milvus_db
+MILVUS_PORT=19530
+
+# Recommendation Engine Configuration
+LAST_UPDATE_CUT=24 months
+SIMILARITY_LIST_SIZE=200
 ```
 
 #### Step 3: The `docker-compose.yml` File
@@ -92,20 +107,18 @@ services:
   # --- INFRASTRUCTURE ---
 
   rabbitmq:
-    image: rabbitmq:latest
+    image: rabbitmq:management-alpine
     container_name: rabbitmq
     ports:
       - "5672:5672"    # AMQP port for services
       - "15672:15672"  # Management UI
     volumes:
-      - rabbitmq_data:/var/lib/rabbitmq/
+      - ./data/rabbitmq:/var/lib/rabbitmq/
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
-    environment:
-      RABBITMQ_ERLANG_COOKIE: "ab3eLHd4xW1amBWjGqzDW6I9idDIFp9h4Tcbn80Iqg4="
     env_file:
       - ./.env
 
@@ -117,7 +130,7 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      - postgres_data:/var/lib/postgresql/data/
+      - ./data/postgres:/var/lib/postgresql/data/
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U user -d github_meta"]
       interval: 10s
@@ -134,7 +147,7 @@ services:
     env_file:
       - ./.env
     volumes:
-      - minio_data:/data
+      - ./data/minio:/data
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
       interval: 10s
@@ -173,6 +186,14 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+
+  milvus:
+    image: milvusdb/milvus:v2.2.0-standalone
+    container_name: milvus_db
+    ports:
+      - "19530:19530"
+    volumes:
+      - milvus_data:/milvus/data
 
   # --- APPLICATION SERVICES (Golang) ---
 
@@ -242,12 +263,40 @@ services:
     env_file:
       - ./.env
 
+  embedding-service:
+    build:
+      context: .
+      dockerfile: ./cmd/embedding-service/Dockerfile
+    container_name: embedding_service
+    depends_on:
+      rabbitmq: { condition: service_healthy }
+      postgres: { condition: service_healthy }
+      minio: { condition: service_healthy }
+      milvus: { condition: service_healthy }
+    restart: unless-stopped
+    env_file:
+      - ./.env
+
+  similarity-engine-service:
+    build:
+      context: .
+      dockerfile: ./cmd/similarity-engine-service/Dockerfile
+    container_name: similarity_engine_service
+    depends_on:
+      postgres: { condition: service_healthy }
+      milvus: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    restart: unless-stopped
+    env_file:
+      - ./.env
+
 volumes:
   rabbitmq_data:
   postgres_data:
   minio_data:
   clickhouse_data:
   redis_data:
+  milvus_data:
 ```
 
 #### Step 4: Generic Go `Dockerfile`
@@ -334,10 +383,16 @@ github-trending/
 │   ├── discovery/
 │   │   ├── Dockerfile
 │   │   └── main.go
+│   ├── embedding-service/
+│   │   ├── Dockerfile
+│   │   └── main.go
 │   ├── processor/
 │   │   ├── Dockerfile
 │   │   └── main.go
-│   └── scheduler/
+│   ├── scheduler/
+│   │   ├── Dockerfile
+│   │   └── main.go
+│   └── similarity-engine-service/
 │       ├── Dockerfile
 │       └── main.go
 ├── internal/
@@ -345,6 +400,8 @@ github-trending/
 │   │   └── config.go
 │   ├── database/
 │   │   ├── clickhouse.go
+│   │   ├── milvus.go
+│   │   ├── minio.go
 │   │   ├── postgres.go
 │   │   └── redis.go
 │   ├── github/          # Your GitHub API client wrapper
@@ -365,7 +422,7 @@ github-trending/
 *   **`cmd/`**: This is the standard Go layout for applications. Each subdirectory is a self-contained microservice with its own `main.go` entrypoint.
 *   **`internal/`**: This is for shared code that is *internal* to your project. Go's tooling prevents other projects from importing packages from an `internal` directory. This is perfect for our shared database clients, models, and messaging logic.
     *   **`config`**: A package to read configuration (like `RABBITMQ_URL`) from environment variables.
-    *   **`database`**: Contains functions to connect to and query PostgreSQL, ClickHouse, and Redis.
+    *   **`database`**: Contains functions to connect to and query PostgreSQL, ClickHouse, Redis, MinIO, and Milvus.
     *   **`github`**: You should build your own small wrapper around the GitHub API client. This lets you centralize rate limiting logic, error handling, and authentication.
     *   **`messaging`**: Functions to connect to RabbitMQ, publish messages to a queue, and consume messages from a queue.
     *   **`models`**: The definition of your core data types (e.g., `RepositoryStats`, `RepositoryMeta`).
@@ -382,9 +439,9 @@ package main
 import (
 	"log"
 
-	"github.com/your-username/github-trending/internal/api"
-	"github.com/your-username/github-trending/internal/config"
-	"github.com/your-username/github-trending/internal/database"
+	"github.com/teomiscia/github-trending/internal/api"
+	"github.com/teomiscia/github-trending/internal/config"
+	"github.com/teomiscia/github-trending/internal/database"
 )
 
 func main() {
@@ -423,13 +480,14 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
-	"github.com/your-username/github-trending/internal/database"
+	"github.com/teomiscia/github-trending/internal/database"
 )
 
 func NewServer(redisClient *redis.Client, db *database.PostgresConnection) *gin.Engine {
@@ -449,12 +507,70 @@ func handleRetrieveList(redisClient *redis.Client, db *database.PostgresConnecti
 		}
 
 		languages := strings.Split(c.Query("languages"), ",")
+		if len(languages) == 1 && languages[0] == "" {
+			languages = []string{}
+		}
 		tags := strings.Split(c.Query("tags"), ",")
+		if len(tags) == 1 && tags[0] == "" {
+			tags = []string{}
+		}
 
-		repoIDs, err := db.GetTrendingRepositoryIDs(languages, tags)
+		var recommendedRepoIDs []int64
+
+		// 1. Query the repository_views table for user history
+		userHistoryRepoIDs, err := db.GetRecentClickedRepositoryIDs(sessionID, 15) // Get last 15 clicked repos
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve repository list"})
-			return
+			log.Printf("Failed to get user history from Postgres: %v", err)
+			// Fallback to generic trending if history fails
+			repoIDs, err := db.GetTrendingRepositoryIDs(languages, tags)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve repository list"})
+				return
+			}
+			recommendedRepoIDs = repoIDs
+		} else if len(userHistoryRepoIDs) == 0 {
+			// 2. If no user history exists, fall back to generic trending
+			repoIDs, err := db.GetTrendingRepositoryIDs(languages, tags)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve repository list"})
+				return
+			}
+			recommendedRepoIDs = repoIDs
+		} else {
+			// 3. If user history exists, aggregate similar repositories
+			candidateScores := make(map[int64]float64)
+			for _, historyRepoID := range userHistoryRepoIDs {
+				redisKey := fmt.Sprintf("similar:%d", historyRepoID)
+				// Fetch top 50 similar repos for each history item
+				similarRepos, err := redisClient.ZRevRangeWithScores(context.Background(), redisKey, 0, 49).Result()
+				if err != nil {
+					log.Printf("Failed to get similar repos from Redis for %d: %v", historyRepoID, err)
+					continue
+				}
+				for _, z := range similarRepos {
+					repoID, _ := strconv.ParseInt(fmt.Sprintf("%.0f", z.Member), 10, 64)
+					candidateScores[repoID] += z.Score
+				}
+			}
+
+			// Convert map to slice for sorting
+			type scoredRepo struct {
+				ID    int64
+				Score float64
+			}
+			var scoredRepos []scoredRepo
+			for id, score := range candidateScores {
+				scoredRepos = append(scoredRepos, scoredRepo{ID: id, Score: score})
+			}
+
+			// Sort by score in descending order
+			sort.Slice(scoredRepos, func(i, j int) bool {
+				return scoredRepos[i].Score > scoredRepos[j].Score
+			})
+
+			for _, sr := range scoredRepos {
+				recommendedRepoIDs = append(recommendedRepoIDs, sr.ID)
+			}
 		}
 
 		// Filter out repositories that have already been seen in this session
@@ -470,10 +586,10 @@ func handleRetrieveList(redisClient *redis.Client, db *database.PostgresConnecti
 			seenRepoIDMap[id] = true
 		}
 
-		var newRepoIDs []int64
-		for _, id := range repoIDs {
+		var finalRepoIDs []int64
+		for _, id := range recommendedRepoIDs {
 			if !seenRepoIDMap[id] {
-				newRepoIDs = append(newRepoIDs, id)
+				finalRepoIDs = append(finalRepoIDs, id)
 			}
 		}
 
@@ -485,18 +601,18 @@ func handleRetrieveList(redisClient *redis.Client, db *database.PostgresConnecti
 		pageSize := 50
 		start := page * pageSize
 		end := start + pageSize
-		if start > len(newRepoIDs) {
-			newRepoIDs = []int64{}
-		} else if end > len(newRepoIDs) {
-			newRepoIDs = newRepoIDs[start:]
+		if start > len(finalRepoIDs) {
+			finalRepoIDs = []int64{}
+		} else if end > len(finalRepoIDs) {
+			finalRepoIDs = finalRepoIDs[start:]
 		} else {
-			newRepoIDs = newRepoIDs[start:end]
+			finalRepoIDs = finalRepoIDs[start:end]
 		}
 
 		// Add the new repositories to the seen set in Redis
-		if len(newRepoIDs) > 0 {
+		if len(finalRepoIDs) > 0 {
 			var repoIDStrs []string
-			for _, id := range newRepoIDs {
+			for _, id := range finalRepoIDs {
 				repoIDStrs = append(repoIDStrs, fmt.Sprint(id))
 			}
 			redisClient.SAdd(context.Background(), sessionID, repoIDStrs)
@@ -504,7 +620,7 @@ func handleRetrieveList(redisClient *redis.Client, db *database.PostgresConnecti
 
 		c.JSON(http.StatusOK, gin.H{
 			"sessionId":    sessionID,
-			"repositories": newRepoIDs,
+			"repositories": finalRepoIDs,
 		})
 	}
 }
@@ -529,7 +645,7 @@ func handleTrackOpenRepository(db *database.PostgresConnection) gin.HandlerFunc 
 		c.JSON(http.StatusOK, gin.H{"status": "success"})
 	}
 }
-```
+
 
 ### Your First Steps: Putting It All Together
 

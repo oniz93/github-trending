@@ -180,3 +180,150 @@ func (pc *PostgresConnection) InsertRepository(repo models.Repository, lastCrawl
 
 	return tx.Commit()
 }
+
+// GetRepositoryByID retrieves a repository by its ID.
+func (pc *PostgresConnection) GetRepositoryByID(repoID int64) (models.Repository, error) {
+	var repo models.Repository
+	var ownerID int
+	var licenseKey sql.NullString
+
+	row := pc.DB.QueryRow(`
+		SELECT
+			r.id, r.node_id, r.name, r.full_name, r.owner_id, r.private, r.html_url, r.description, r.is_fork, r.url, r.created_at, r.updated_at, r.pushed_at, r.homepage, r.size, r.stargazers_count, r.watchers_count, r.language, r.forks_count, r.open_issues_count, r.default_branch, r.score, r.has_issues, r.has_projects, r.has_pages, r.has_wiki, r.has_downloads, r.has_discussions, r.is_archived, r.is_disabled, r.visibility, r.license_key, r.is_template, r.readme_url, r.last_crawled_at,
+			o.login, o.node_id, o.avatar_url, o.html_url, o.type, o.site_admin,
+			l.name, l.spdx_id, l.url, l.node_id
+		FROM
+			repositories r
+		JOIN
+			owners o ON r.owner_id = o.id
+		LEFT JOIN
+			licenses l ON r.license_key = l.key
+		WHERE
+			r.id = $1
+	`, repoID)
+
+	err := row.Scan(
+		&repo.ID, &repo.NodeID, &repo.Name, &repo.FullName, &ownerID, &repo.Private, &repo.HTMLURL, &repo.Description, &repo.Fork, &repo.URL, &repo.CreatedAt, &repo.UpdatedAt, &repo.PushedAt, &repo.Homepage, &repo.Size, &repo.StargazersCount, &repo.WatchersCount, &repo.Language, &repo.ForksCount, &repo.OpenIssuesCount, &repo.DefaultBranch, &repo.Score, &repo.HasIssues, &repo.HasProjects, &repo.HasPages, &repo.HasWiki, &repo.HasDownloads, &repo.HasDiscussions, &repo.Archived, &repo.Disabled, &repo.Visibility, &licenseKey, &repo.IsTemplate, &repo.ReadmeURL, &repo.LastCrawledAt,
+		&repo.Owner.Login, &repo.Owner.NodeID, &repo.Owner.AvatarURL, &repo.Owner.HTMLURL, &repo.Owner.Type, &repo.Owner.SiteAdmin,
+		&repo.License.Name, &repo.License.SpdxID, &repo.License.URL, &repo.License.NodeID,
+	)
+
+	if err != nil {
+		return models.Repository{}, fmt.Errorf("failed to query repository: %w", err)
+	}
+
+	if licenseKey.Valid {
+		repo.License.Key = licenseKey.String
+	}
+
+	// Fetch tags
+	tags, err := pc.getTagsForRepository(repoID)
+	if err != nil {
+		return models.Repository{}, fmt.Errorf("failed to get tags for repository: %w", err)
+	}
+	repo.Tags = tags
+
+	// Fetch languages
+	languages, err := pc.getLanguagesForRepository(repoID)
+	if err != nil {
+		return models.Repository{}, fmt.Errorf("failed to get languages for repository: %w", err)
+	}
+	repo.Languages = languages
+
+	return repo, nil
+}
+
+func (pc *PostgresConnection) getTagsForRepository(repoID int64) ([]string, error) {
+	rows, err := pc.DB.Query(`
+		SELECT
+			t.name
+		FROM
+			tags t
+		JOIN
+			repository_tags rt ON t.id = rt.tag_id
+		WHERE
+			rt.repository_id = $1
+	`, repoID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var tags []string
+	for rows.Next() {
+		var tag string
+		if err := rows.Scan(&tag); err != nil {
+			return nil, err
+		}
+		tags = append(tags, tag)
+	}
+	return tags, nil
+}
+
+func (pc *PostgresConnection) getLanguagesForRepository(repoID int64) (map[string]int, error) {
+	rows, err := pc.DB.Query(`
+		SELECT
+			l.name, rl.size
+		FROM
+			languages l
+		JOIN
+			repository_languages rl ON l.id = rl.language_id
+		WHERE
+			rl.repository_id = $1
+	`, repoID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	languages := make(map[string]int)
+	for rows.Next() {
+		var name string
+		var size int
+		if err := rows.Scan(&name, &size); err != nil {
+			return nil, err
+		}
+		languages[name] = size
+	}
+	return languages, nil
+}
+
+// GetRepositoryIDsUpdatedSince retrieves a list of repository IDs that have been updated since a given time.
+func (pc *PostgresConnection) GetRepositoryIDsUpdatedSince(since time.Time) ([]int64, error) {
+	rows, err := pc.DB.Query("SELECT id FROM repositories WHERE pushed_at >= $1", since)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+
+	return ids, nil
+}
+
+// GetRecentClickedRepositoryIDs retrieves a list of recently clicked repository IDs for a given session.
+func (pc *PostgresConnection) GetRecentClickedRepositoryIDs(sessionID string, limit int) ([]int64, error) {
+	rows, err := pc.DB.Query("SELECT repository_id FROM repository_views WHERE session_id = $1 ORDER BY viewed_at DESC LIMIT $2", sessionID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+
+	return ids, nil
+}

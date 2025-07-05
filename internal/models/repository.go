@@ -19,6 +19,12 @@ type CrawlResult struct {
 	CrawledAt    time.Time `json:"crawled_at"`
 }
 
+// ReadmeEmbedMessage is the message that triggers README embedding.
+type ReadmeEmbedMessage struct {
+	RepositoryID int64  `json:"repository_id"`
+	MinioPath    string `json:"minio_path"`
+}
+
 type Repository struct {
 	ID                int       `json:"id"`
 	NodeID            string    `json:"node_id"`

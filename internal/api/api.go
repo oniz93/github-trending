@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -30,12 +31,70 @@ func handleRetrieveList(redisClient *redis.Client, db *database.PostgresConnecti
 		}
 
 		languages := strings.Split(c.Query("languages"), ",")
+		if len(languages) == 1 && languages[0] == "" {
+			languages = []string{}
+		}
 		tags := strings.Split(c.Query("tags"), ",")
+		if len(tags) == 1 && tags[0] == "" {
+			tags = []string{}
+		}
 
-		repoIDs, err := db.GetTrendingRepositoryIDs(languages, tags)
+		var recommendedRepoIDs []int64
+
+		// 1. Query the repository_views table for user history
+		userHistoryRepoIDs, err := db.GetRecentClickedRepositoryIDs(sessionID, 15) // Get last 15 clicked repos
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve repository list"})
-			return
+			log.Printf("Failed to get user history from Postgres: %v", err)
+			// Fallback to generic trending if history fails
+			repoIDs, err := db.GetTrendingRepositoryIDs(languages, tags)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve repository list"})
+				return
+			}
+			recommendedRepoIDs = repoIDs
+		} else if len(userHistoryRepoIDs) == 0 {
+			// 2. If no user history exists, fall back to generic trending
+			repoIDs, err := db.GetTrendingRepositoryIDs(languages, tags)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve repository list"})
+				return
+			}
+			recommendedRepoIDs = repoIDs
+		} else {
+			// 3. If user history exists, aggregate similar repositories
+			candidateScores := make(map[int64]float64)
+			for _, historyRepoID := range userHistoryRepoIDs {
+				redisKey := fmt.Sprintf("similar:%d", historyRepoID)
+				// Fetch top 50 similar repos for each history item
+				similarRepos, err := redisClient.ZRevRangeWithScores(context.Background(), redisKey, 0, 49).Result()
+				if err != nil {
+					log.Printf("Failed to get similar repos from Redis for %d: %v", historyRepoID, err)
+					continue
+				}
+				for _, z := range similarRepos {
+					repoID, _ := strconv.ParseInt(fmt.Sprintf("%.0f", z.Member), 10, 64)
+					candidateScores[repoID] += z.Score
+				}
+			}
+
+			// Convert map to slice for sorting
+			type scoredRepo struct {
+				ID    int64
+				Score float64
+			}
+			var scoredRepos []scoredRepo
+			for id, score := range candidateScores {
+				scoredRepos = append(scoredRepos, scoredRepo{ID: id, Score: score})
+			}
+
+			// Sort by score in descending order
+			sort.Slice(scoredRepos, func(i, j int) bool {
+				return scoredRepos[i].Score > scoredRepos[j].Score
+			})
+
+			for _, sr := range scoredRepos {
+				recommendedRepoIDs = append(recommendedRepoIDs, sr.ID)
+			}
 		}
 
 		// Filter out repositories that have already been seen in this session
@@ -51,10 +110,10 @@ func handleRetrieveList(redisClient *redis.Client, db *database.PostgresConnecti
 			seenRepoIDMap[id] = true
 		}
 
-		var newRepoIDs []int64
-		for _, id := range repoIDs {
+		var finalRepoIDs []int64
+		for _, id := range recommendedRepoIDs {
 			if !seenRepoIDMap[id] {
-				newRepoIDs = append(newRepoIDs, id)
+				finalRepoIDs = append(finalRepoIDs, id)
 			}
 		}
 
@@ -66,18 +125,18 @@ func handleRetrieveList(redisClient *redis.Client, db *database.PostgresConnecti
 		pageSize := 50
 		start := page * pageSize
 		end := start + pageSize
-		if start > len(newRepoIDs) {
-			newRepoIDs = []int64{}
-		} else if end > len(newRepoIDs) {
-			newRepoIDs = newRepoIDs[start:]
+		if start > len(finalRepoIDs) {
+			finalRepoIDs = []int64{}
+		} else if end > len(finalRepoIDs) {
+			finalRepoIDs = finalRepoIDs[start:]
 		} else {
-			newRepoIDs = newRepoIDs[start:end]
+			finalRepoIDs = finalRepoIDs[start:end]
 		}
 
 		// Add the new repositories to the seen set in Redis
-		if len(newRepoIDs) > 0 {
+		if len(finalRepoIDs) > 0 {
 			var repoIDStrs []string
-			for _, id := range newRepoIDs {
+			for _, id := range finalRepoIDs {
 				repoIDStrs = append(repoIDStrs, fmt.Sprint(id))
 			}
 			redisClient.SAdd(context.Background(), sessionID, repoIDStrs)
@@ -85,7 +144,7 @@ func handleRetrieveList(redisClient *redis.Client, db *database.PostgresConnecti
 
 		c.JSON(http.StatusOK, gin.H{
 			"sessionId":    sessionID,
-			"repositories": newRepoIDs,
+			"repositories": finalRepoIDs,
 		})
 	}
 }
