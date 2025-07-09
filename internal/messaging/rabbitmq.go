@@ -5,6 +5,13 @@ import (
 	"github.com/streadway/amqp"
 )
 
+// MQConnection defines the interface for RabbitMQ connection operations.
+type MQConnection interface {
+	Consume(queueName string) (<-chan amqp.Delivery, error)
+	Publish(queueName string, body []byte) error
+	Close() error
+}
+
 // Connection represents a connection to RabbitMQ.
 type Connection struct {
 	*amqp.Connection

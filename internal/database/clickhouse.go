@@ -1,15 +1,19 @@
 package database
 
 import (
-	"context"
 	"database/sql"
 	"fmt"
-	"log"
 	"time"
 
-	"github.com/ClickHouse/clickhouse-go/v2"
+	"github.com/ClickHouse/clickhouse-go"
 	"github.com/teomiscia/github-trending/internal/models"
 )
+
+// CHConnection defines the interface for ClickHouse connection operations.
+type CHConnection interface {
+	InsertRepositoryStats(repo models.Repository) error
+	Close() error
+}
 
 // ClickHouseConnection holds the database connection.
 type ClickHouseConnection struct {
@@ -17,43 +21,42 @@ type ClickHouseConnection struct {
 }
 
 // NewClickHouseConnection creates a new connection to the ClickHouse database.
-func NewClickHouseConnection(host string, port int, user, password, database string) (*ClickHouseConnection, error) {
-	db := clickhouse.OpenDB(&clickhouse.Options{
-		Addr: []string{fmt.Sprintf("%s:%d", host, port)},
-		Auth: clickhouse.Auth{
-			Database: database,
-			Username: user,
-			Password: password,
-		},
-	})
-
-	if err := db.PingContext(context.Background()); err != nil {
+func NewClickHouseConnection(host, port, user, password, database string) (*ClickHouseConnection, error) {
+	connect, err := sql.Open("clickhouse", fmt.Sprintf("tcp://%s:%s?username=%s&password=%s&database=%s", host, port, user, password, database))
+	if err != nil {
 		return nil, err
 	}
 
-	return &ClickHouseConnection{DB: db}, nil
+	if err := connect.Ping(); err != nil {
+		if exception, ok := err.(*clickhouse.Exception); ok {
+			fmt.Printf("[%d] %s\n%s\n", exception.Code, exception.Message, exception.StackTrace)
+		}
+		return nil, err
+	}
+
+	return &ClickHouseConnection{DB: connect}, nil
 }
 
-// InsertRepositoryStats inserts repository statistics into ClickHouse.
-func (ch *ClickHouseConnection) InsertRepositoryStats(repo models.Repository, discoveredAt time.Time) error {
+// Close closes the database connection.
+func (ch *ClickHouseConnection) Close() error {
+	return ch.DB.Close()
+}
+
+// InsertRepositoryStats inserts repository statistics into the database.
+func (ch *ClickHouseConnection) InsertRepositoryStats(repo models.Repository) error {
 	tx, err := ch.DB.Begin()
 	if err != nil {
 		return err
 	}
 
-	stmt, err := tx.Prepare(`
-		INSERT INTO repository_stats (
-			event_date, event_time, repository_id, stargazers_count, watchers_count, forks_count, open_issues_count, pushed_at, score
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`)
+	stmt, err := tx.Prepare("INSERT INTO repository_stats (event_date, event_time, repository_id, stargazers_count, watchers_count, forks_count, open_issues_count, pushed_at, score) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
 	if err != nil {
 		return err
 	}
-	defer stmt.Close()
 
 	_, err = stmt.Exec(
-		discoveredAt.Format("2006-01-02"),
-		discoveredAt,
+		time.Now(),
+		time.Now(),
 		repo.ID,
 		repo.StargazersCount,
 		repo.WatchersCount,
@@ -63,8 +66,7 @@ func (ch *ClickHouseConnection) InsertRepositoryStats(repo models.Repository, di
 		repo.Score,
 	)
 	if err != nil {
-		log.Printf("Failed to insert repository stats: %v", err)
-		return tx.Rollback()
+		return err
 	}
 
 	return tx.Commit()

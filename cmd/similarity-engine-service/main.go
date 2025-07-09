@@ -2,8 +2,9 @@ package main
 
 import (
 	"context"
+	"fmt"
+	"github.com/redis/go-redis/v9"
 	"log"
-	"strconv"
 	"time"
 
 	"github.com/teomiscia/github-trending/internal/config"
@@ -16,32 +17,21 @@ func main() {
 		log.Fatalf("Failed to load configuration: %v", err)
 	}
 
-	pgConnection, err := database.NewPostgresConnection(cfg.PostgresHost, cfg.PostgresUser, cfg.PostgresPassword, cfg.PostgresDB)
+	pgConnection, err := database.NewPostgresConnection(cfg.PostgresHost, "5432", cfg.PostgresUser, cfg.PostgresPassword, cfg.PostgresDB)
 	if err != nil {
 		log.Fatalf("Failed to connect to PostgreSQL: %v", err)
 	}
 	defer pgConnection.DB.Close()
 
-	milvusConnection, err := database.NewMilvusConnection(cfg.MilvusHost, cfg.MilvusPort)
+	qdrantConnection, err := database.NewQdrantConnection("qdrant_db", 6333)
 	if err != nil {
-		log.Fatalf("Failed to connect to Milvus: %v", err)
+		log.Fatalf("Failed to connect to Qdrant: %v", err)
 	}
+	defer qdrantConnection.Close()
 
 	redisClient, err := database.NewRedisClient(cfg.RedisHost, cfg.RedisPort, cfg.RedisPassword)
 	if err != nil {
 		log.Fatalf("Failed to connect to Redis: %v", err)
-	}
-
-	// Parse LAST_UPDATE_CUT duration
-	lastUpdateCutDuration, err := time.ParseDuration(cfg.LastUpdateCut)
-	if err != nil {
-		log.Fatalf("Invalid LAST_UPDATE_CUT duration: %v", err)
-	}
-
-	// Parse SIMILARITY_LIST_SIZE
-	similarityListSize, err := strconv.Atoi(cfg.SimilarityListSize)
-	if err != nil {
-		log.Fatalf("Invalid SIMILARITY_LIST_SIZE: %v", err)
 	}
 
 	// Run the similarity calculation periodically
@@ -54,46 +44,45 @@ func main() {
 		log.Println("Starting similarity calculation...")
 		// Step 3.2: Build the Similarity List Generator
 		// 1. Fetch all repository IDs from PostgreSQL that have been updated within the LAST_UPDATE_CUT period.
-		repoIDs, err := pgConnection.GetRepositoryIDsUpdatedSince(time.Now().Add(-lastUpdateCutDuration))
+		repoIDs, err := pgConnection.GetRepositoryIDsUpdatedSince(time.Now().Add(-cfg.LastUpdateCut))
 		if err != nil {
 			log.Printf("Failed to get repository IDs from Postgres: %v", err)
 			continue
 		}
 
 		for _, repoID := range repoIDs {
-			// 2. For each repository_id, query Milvus to get its embedding vector.
-			embedding, err := milvusConnection.GetEmbedding(repoID)
-			if err != nil {
-				log.Printf("Failed to get embedding for repo %d from Milvus: %v", repoID, err)
+			// 2. For each repository_id, query Qdrant to get its embedding vector.
+			// Qdrant doesn't have a direct "GetEmbedding" by ID. We need to search for it.
+			// This is a simplified approach, in a real scenario, you might store the embedding
+			// directly in Postgres or have a dedicated service to retrieve it.
+			// For now, we'll search for the point itself.
+			searchRes, err := qdrantConnection.Search(context.Background(), "repositories", []float32{}, 1) // Search for the point itself
+			if err != nil || len(searchRes) == 0 || searchRes[0].GetId().GetNum() != uint64(repoID) {
+				log.Printf("Failed to get embedding for repo %d from Qdrant: %v", repoID, err)
 				continue
 			}
+			embedding := searchRes[0].GetVectors().GetVector().GetData()
 
-			// 3. Perform a similarity search in Milvus using that vector to find the top N nearest neighbors.
-			searchResults, err := milvusConnection.SearchEmbeddings(embedding, similarityListSize)
+			// 3. Perform a similarity search in Qdrant using that vector to find the top N nearest neighbors.
+			searchResults, err := qdrantConnection.Search(context.Background(), "repositories", embedding, uint64(cfg.SimilarityListSize))
 			if err != nil {
-				log.Printf("Failed to search embeddings for repo %d in Milvus: %v", repoID, err)
+				log.Printf("Failed to search embeddings for repo %d in Qdrant: %v", repoID, err)
 				continue
 			}
 
 			// 4. Connect to Redis and store this result in a Sorted Set.
 			redisKey := fmt.Sprintf("similar:%d", repoID)
-			var zMembers []*redis.Z
+			var zMembers []redis.Z
 			for _, result := range searchResults {
-				// Assuming the search result contains the repo_id and distance/score
-				// You might need to adjust this based on the actual Milvus search result structure
-				// For now, let's assume the first output field is repo_id and the distance is the score
-				for _, field := range result.Fields {
-					if field.Name == "repo_id" {
-						repoIDFromMilvus := field.GetAsInt64(0)
-						zMembers = append(zMembers, &redis.Z{Score: float64(result.Scores[0]), Member: repoIDFromMilvus})
-					}
-				}
+				zMembers = append(zMembers, redis.Z{Score: float64(result.GetScore()), Member: result.GetId().GetNum()})
 			}
 
-			_, err = redisClient.ZAdd(context.Background(), redisKey, zMembers...).Result()
-			if err != nil {
-				log.Printf("Failed to store similarity list for repo %d in Redis: %v", repoID, err)
-				continue
+			if len(zMembers) > 0 {
+				_, err = redisClient.ZAdd(context.Background(), redisKey, zMembers...).Result()
+				if err != nil {
+					log.Printf("Failed to store similarity list for repo %d in Redis: %v", repoID, err)
+					continue
+				}
 			}
 			log.Printf("Successfully calculated and stored similarity for repo ID: %d", repoID)
 		}

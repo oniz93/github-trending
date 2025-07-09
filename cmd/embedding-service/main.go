@@ -3,10 +3,10 @@ package main
 import (
 	"context"
 	"encoding/json"
+	qdrant_go_client "github.com/qdrant/go-client/qdrant"
 	"io"
 	"log"
 	"net/http"
-	"time"
 
 	"github.com/teomiscia/github-trending/internal/config"
 	"github.com/teomiscia/github-trending/internal/database"
@@ -26,7 +26,7 @@ func main() {
 	}
 	defer mqConnection.Close()
 
-	pgConnection, err := database.NewPostgresConnection(cfg.PostgresHost, cfg.PostgresUser, cfg.PostgresPassword, cfg.PostgresDB)
+	pgConnection, err := database.NewPostgresConnection(cfg.PostgresHost, "5432", cfg.PostgresUser, cfg.PostgresPassword, cfg.PostgresDB)
 	if err != nil {
 		log.Fatalf("Failed to connect to PostgreSQL: %v", err)
 	}
@@ -37,9 +37,17 @@ func main() {
 		log.Fatalf("Failed to connect to MinIO: %v", err)
 	}
 
-	milvusConnection, err := database.NewMilvusConnection(cfg.MilvusHost, cfg.MilvusPort)
+	qdrantConnection, err := database.NewQdrantConnection("qdrant_db", 6334)
 	if err != nil {
-		log.Fatalf("Failed to connect to Milvus: %v", err)
+		log.Fatalf("Failed to connect to Qdrant: %v", err)
+	}
+	defer qdrantConnection.Close()
+
+	const vectorSize = 384
+	log.Printf("Ensuring Qdrant collection 'repositories' exists with vector size %d", vectorSize)
+	err = qdrantConnection.CreateCollection(context.Background(), "repositories", vectorSize)
+	if err != nil {
+		log.Fatalf("Failed to create or verify Qdrant collection: %v", err)
 	}
 
 	readmeEmbedQueueName := "readme_to_embed"
@@ -69,28 +77,14 @@ func main() {
 			continue
 		}
 
-		// 2. Check LAST_UPDATE_CUT
-		lastUpdateCutDuration, err := time.ParseDuration(cfg.LastUpdateCut)
-		if err != nil {
-			log.Printf("Invalid LAST_UPDATE_CUT duration: %v", err)
-			d.Ack(false) // Acknowledge and skip if config is bad
-			continue
-		}
-
-		if repo.PushedAt.Before(time.Now().Add(-lastUpdateCutDuration)) {
-			log.Printf("Skipping embedding for repo %d (pushed_at: %s) as it's older than %s", embedMsg.RepositoryID, repo.PushedAt, cfg.LastUpdateCut)
-			d.Ack(false)
-			continue
-		}
-
 		// 3. Fetch README content from MinIO
 		readmeContent, err := minioConnection.GetFile(context.Background(), embedMsg.MinioPath)
 		if err != nil {
 			log.Printf("Failed to get README from MinIO for %s: %v", embedMsg.MinioPath, err)
 			// 4. Fallback: Download README directly if not in MinIO
-			if repo.ReadmeURL != "" {
+			if repo.ReadmeURL.Valid {
 				log.Printf("Attempting to download README from %s", repo.ReadmeURL)
-				resp, httpErr := http.Get(repo.ReadmeURL)
+				resp, httpErr := http.Get(repo.ReadmeURL.String)
 				if httpErr != nil || resp.StatusCode != http.StatusOK {
 					log.Printf("Failed to download README from URL %s: %v", repo.ReadmeURL, httpErr)
 					d.Nack(false, true)
@@ -114,9 +108,15 @@ func main() {
 		// For now, create a dummy embedding
 		embedding := generateEmbedding(readmeContent)
 
-		// 6. Save embedding to Milvus
-		if err := milvusConnection.InsertEmbedding(embedMsg.RepositoryID, embedding); err != nil {
-			log.Printf("Failed to insert embedding for repo %d into Milvus: %v", embedMsg.RepositoryID, err)
+		// 6. Save embedding to Qdrant
+		points := []*qdrant_go_client.PointStruct{
+			{
+				Id:      &qdrant_go_client.PointId{PointIdOptions: &qdrant_go_client.PointId_Num{Num: uint64(embedMsg.RepositoryID)}},
+				Vectors: &qdrant_go_client.Vectors{VectorsOptions: &qdrant_go_client.Vectors_Vector{Vector: &qdrant_go_client.Vector{Data: embedding}}},
+			},
+		}
+		if err := qdrantConnection.UpsertVectors(context.Background(), "repositories", points); err != nil {
+			log.Printf("Failed to insert embedding for repo %d into Qdrant: %v", embedMsg.RepositoryID, err)
 			d.Nack(false, true) // Requeue for retry
 			continue
 		}

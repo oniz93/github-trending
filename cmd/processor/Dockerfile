@@ -12,7 +12,8 @@ COPY internal ./internal
 RUN go mod download
 
 # Copy the rest of the application source code.
-COPY cmd/processor .
+COPY cmd/processor/processor ./cmd/processor/processor
+COPY cmd/processor/main.go ./
 
 # Build the Go application.
 # -o /app/main specifies the output file.

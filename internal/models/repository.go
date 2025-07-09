@@ -1,6 +1,9 @@
 package models
 
-import "time"
+import (
+	"database/sql"
+	"time"
+)
 
 // DiscoveryMessage is the message that the discovery service sends to the crawler.
 // It contains the repository data and the date of the discovery.
@@ -27,23 +30,23 @@ type ReadmeEmbedMessage struct {
 
 type Repository struct {
 	ID                int       `json:"id"`
-	NodeID            string    `json:"node_id"`
+	NodeID            sql.NullString `json:"node_id"`
 	Name              string    `json:"name"`
 	FullName          string    `json:"full_name"`
 	Owner             Owner     `json:"owner"`
 	Private           bool      `json:"private"`
 	HTMLURL           string    `json:"html_url"`
-	Description       string    `json:"description"`
+	Description       sql.NullString    `json:"description"`
 	Fork              bool      `json:"fork"`
 	URL               string    `json:"url"`
 	CreatedAt         time.Time `json:"created_at"`
 	UpdatedAt         time.Time `json:"updated_at"`
 	PushedAt          time.Time `json:"pushed_at"`
-	Homepage          string    `json:"homepage"`
+	Homepage          sql.NullString    `json:"homepage"`
 	Size              int       `json:"size"`
 	StargazersCount   int       `json:"stargazers_count"`
 	WatchersCount     int       `json:"watchers_count"`
-	Language          string    `json:"language"`
+	Language          sql.NullString    `json:"language"`
 	ForksCount        int       `json:"forks_count"`
 	OpenIssuesCount   int       `json:"open_issues_count"`
 	DefaultBranch     string    `json:"default_branch"`
@@ -61,7 +64,7 @@ type Repository struct {
 	License           License   `json:"license"`
 	AllowForking      bool      `json:"allow_forking"`
 	IsTemplate        bool      `json:"is_template"`
-	ReadmeURL         string    `json:"readme_url"`
+	ReadmeURL         sql.NullString    `json:"readme_url"`
 	Tags              []string  `json:"tags"`
 	Languages         map[string]int `json:"languages"`
 	LastCrawledAt     time.Time `json:"last_crawled_at"`
@@ -70,17 +73,17 @@ type Repository struct {
 type Owner struct {
 	Login     string `json:"login"`
 	ID        int    `json:"id"`
-	NodeID    string `json:"node_id"`
+	NodeID    sql.NullString `json:"node_id"`
 	AvatarURL string `json:"avatar_url"`
 	HTMLURL   string `json:"html_url"`
 	Type      string `json:"type"`
-	SiteAdmin bool   `json:"site_admin"`
+	SiteAdmin sql.NullBool `json:"site_admin"`
 }
 
 type License struct {
-	Key    string `json:"key"`
-	Name   string `json:"name"`
-	SpdxID string `json:"spdx_id"`
-	URL    string `json:"url"`
-	NodeID string `json:"node_id"`
+	Key    sql.NullString `json:"key"`
+	Name   sql.NullString `json:"name"`
+	SpdxID sql.NullString `json:"spdx_id"`
+	URL    sql.NullString `json:"url"`
+	NodeID sql.NullString `json:"node_id"`
 }

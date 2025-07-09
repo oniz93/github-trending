@@ -10,6 +10,13 @@ import (
 	"github.com/minio/minio-go/v7/pkg/credentials"
 )
 
+// MinioClient defines the interface for MinIO client operations.
+type MinioClient interface {
+	UploadFile(ctx context.Context, objectName string, reader io.Reader, objectSize int64, contentType string) (minio.UploadInfo, error)
+	GetFile(ctx context.Context, objectName string) ([]byte, error)
+	Close() error
+}
+
 // MinioConnection holds the MinIO client.
 type MinioConnection struct {
 	Client *minio.Client
@@ -52,6 +59,11 @@ func NewMinioConnection(endpoint, accessKeyID, secretAccessKey string) (*MinioCo
 	}
 
 	return &MinioConnection{Client: minioClient, Bucket: bucketName}, nil
+}
+
+// Close is a no-op for MinIO client as it doesn't have a Close method.
+func (mc *MinioConnection) Close() error {
+	return nil
 }
 
 // UploadFile uploads a file to MinIO.

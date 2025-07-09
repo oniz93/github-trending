@@ -663,3 +663,10 @@ func handleTrackOpenRepository(db *database.PostgresConnection) gin.HandlerFunc 
 You will see Docker build each of your Go services and then start all the containers. You can visit `http://localhost:15672` (user: `guest`, pass: `guest`) to see the RabbitMQ management UI, `http://localhost:9001` for MinIO, and connect to the databases on their respective ports.
 
 This setup gives you a complete, professional foundation. You can now focus on writing the Go logic inside each microservice, knowing that the infrastructure and communication layer is already handled.
+
+### Summary of Changes (2025-07-08)
+
+*   **Refactored Database Schema:** Separated repository metadata (stored in PostgreSQL) from time-series statistics (stored in ClickHouse) to improve performance and scalability.
+*   **Fixed Data Ingestion Pipeline:** Corrected several bugs in the data ingestion pipeline that were causing errors and preventing data from being processed correctly.
+*   **Improved Configuration Handling:** Updated the configuration loading logic to correctly parse custom duration units.
+*   **Updated Documentation:** Updated the `GEMINI.md` and `README.md` files to reflect the latest architectural changes and fixes.

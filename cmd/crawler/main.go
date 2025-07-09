@@ -1,6 +1,7 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -26,19 +27,26 @@ func main() {
 	}
 	defer mqConnection.Close()
 
-	dbConnection, err := database.NewPostgresConnection(cfg.PostgresHost, cfg.PostgresUser, cfg.PostgresPassword, cfg.PostgresDB)
+	dbConnection, err := database.NewPostgresConnection(cfg.PostgresHost, "5432", cfg.PostgresUser, cfg.PostgresPassword, cfg.PostgresDB)
 	if err != nil {
 		log.Fatalf("Failed to connect to PostgreSQL: %v", err)
 	}
 	defer dbConnection.DB.Close()
 
-	githubClient := github.NewGitHubClient(cfg.GitHubToken)
+	githubClient := github.NewGitHubClient(cfg.GitHubToken, nil)
 	crawlQueueName := "repos_to_crawl"
 	processQueueName := "raw_data_to_process"
 
+	err = runCrawler(mqConnection, dbConnection, githubClient, http.DefaultClient, "https://raw.githubusercontent.com", crawlQueueName, processQueueName)
+	if err != nil {
+		log.Fatalf("Crawler service failed: %v", err)
+	}
+}
+
+func runCrawler(mqConnection messaging.MQConnection, dbConnection database.DBConnection, githubClient *github.GitHubClient, httpClient *http.Client, rawContentBaseURL, crawlQueueName, processQueueName string) error {
 	msgs, err := mqConnection.Consume(crawlQueueName)
 	if err != nil {
-		log.Fatalf("Failed to start consuming from queue %s: %v", crawlQueueName, err)
+		return fmt.Errorf("failed to start consuming from queue %s: %w", crawlQueueName, err)
 	}
 
 	log.Printf("Crawler service started. Waiting for messages on queue: %s", crawlQueueName)
@@ -54,7 +62,7 @@ func main() {
 		repo := msg.Repository
 		log.Printf("Received a message to crawl: %s", repo.FullName)
 
-		lastCrawledAt, err := dbConnection.GetLastCrawlTime(repo.ID)
+		lastCrawledAt, err := dbConnection.GetLastCrawlTime(int64(repo.ID))
 		if err != nil {
 			log.Printf("Failed to get last crawl time for %s: %v", repo.FullName, err)
 			// Decide if you want to continue or not
@@ -66,7 +74,12 @@ func main() {
 			continue
 		}
 
-		repo.ReadmeURL = findReadme(&repo)
+		readmeURL := findReadme(httpClient, &repo, rawContentBaseURL)
+		if readmeURL != "" {
+			repo.ReadmeURL = sql.NullString{String: readmeURL, Valid: true}
+		} else {
+			repo.ReadmeURL = sql.NullString{Valid: false}
+		}
 		repo.Tags, err = githubClient.GetTags(repo.FullName)
 		if err != nil {
 			log.Printf("Failed to get tags for %s: %v", repo.FullName, err)
@@ -102,23 +115,30 @@ func main() {
 		log.Printf("Successfully crawled and published data for: %s", repo.FullName)
 		d.Ack(false)
 	}
+	return nil
 }
 
-func findReadme(repo *models.Repository) string {
+func findReadme(client *http.Client, repo *models.Repository, rawContentBaseURL string) string {
 	readmeNames := []string{"README.md", "README.txt"}
 
 	for _, name := range readmeNames {
-		url := fmt.Sprintf("https://raw.githubusercontent.com/%s/refs/heads/%s/%s", repo.FullName, repo.DefaultBranch, name)
+		url := fmt.Sprintf("%s/%s/%s/%s", rawContentBaseURL, repo.FullName, repo.DefaultBranch, name)
 
-		resp, err := http.Head(url)
+		resp, err := client.Head(url)
 		if err == nil && resp.StatusCode == http.StatusOK {
+			log.Printf("Found README for %s at %s", repo.FullName, url)
 			resp.Body.Close()
 			return url
 		}
+
 		if resp != nil {
+			log.Printf("Checked for README at %s, status code: %d", url, resp.StatusCode)
 			resp.Body.Close()
+		} else {
+			log.Printf("Error checking for README at %s: %v", url, err)
 		}
 	}
 
+	log.Printf("README not found for %s", repo.FullName)
 	return ""
 }

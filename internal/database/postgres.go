@@ -11,14 +11,22 @@ import (
 	"github.com/teomiscia/github-trending/internal/models"
 )
 
+// DBConnection defines the interface for PostgreSQL database operations.
+type DBConnection interface {
+	GetLastCrawlTime(repoID int64) (time.Time, error)
+	InsertRepository(repo models.Repository, lastCrawledAt time.Time) error
+	GetRepositoryByID(repoID int64) (models.Repository, error)
+	Close() error
+}
+
 // PostgresConnection holds the database connection.
 type PostgresConnection struct {
 	DB *sql.DB
 }
 
 // NewPostgresConnection creates a new connection to the PostgreSQL database.
-func NewPostgresConnection(host, user, password, dbname string) (*PostgresConnection, error) {
-	connStr := fmt.Sprintf("host=%s user=%s password=%s dbname=%s sslmode=disable", host, user, password, dbname)
+func NewPostgresConnection(host, port, user, password, dbname string) (*PostgresConnection, error) {
+	connStr := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable", host, port, user, password, dbname)
 	db, err := sql.Open("postgres", connStr)
 	if err != nil {
 		return nil, err
@@ -29,6 +37,11 @@ func NewPostgresConnection(host, user, password, dbname string) (*PostgresConnec
 	}
 
 	return &PostgresConnection{DB: db}, nil
+}
+
+// Close closes the database connection.
+func (pc *PostgresConnection) Close() error {
+	return pc.DB.Close()
 }
 
 // TrackRepositoryView inserts a record of a repository view into the database.
@@ -78,7 +91,7 @@ func (pc *PostgresConnection) GetTrendingRepositoryIDs(languages []string, tags 
 }
 
 // GetLastCrawlTime retrieves the last time a repository was crawled.
-func (pc *PostgresConnection) GetLastCrawlTime(repoID int) (time.Time, error) {
+func (pc *PostgresConnection) GetLastCrawlTime(repoID int64) (time.Time, error) {
 	var lastCrawledAt time.Time
 	err := pc.DB.QueryRow("SELECT last_crawled_at FROM repositories WHERE id = $1", repoID).Scan(&lastCrawledAt)
 	if err != nil {
@@ -110,7 +123,7 @@ func (pc *PostgresConnection) InsertRepository(repo models.Repository, lastCrawl
 	}
 
 	// Insert license
-	if repo.License.Key != "" {
+	if repo.License.Key.Valid {
 		_, err = tx.Exec(`
 			INSERT INTO licenses (key, name, spdx_id, url, node_id)
 			VALUES ($1, $2, $3, $4, $5)
@@ -126,12 +139,12 @@ func (pc *PostgresConnection) InsertRepository(repo models.Repository, lastCrawl
 
 	// Insert repository
 	_, err = tx.Exec(`
-		INSERT INTO repositories (id, name, full_name, owner_id, description, html_url, homepage, default_branch, license_key, readme_url, created_at, is_fork, is_template, is_archived, is_disabled, last_crawled_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+		INSERT INTO repositories (id, node_id, name, full_name, owner_id, description, html_url, homepage, default_branch, license_key, readme_url, created_at, is_fork, is_template, is_archived, is_disabled, last_crawled_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
 		ON CONFLICT (id) DO UPDATE SET
-			name = $2, full_name = $3, owner_id = $4, description = $5, html_url = $6, homepage = $7, default_branch = $8, license_key = $9, readme_url = $10, created_at = $11, is_fork = $12, is_template = $13, is_archived = $14, is_disabled = $15, last_crawled_at = $16
-	`, repo.ID, repo.Name, repo.FullName, repo.Owner.ID, repo.Description, repo.HTMLURL, repo.Homepage, repo.DefaultBranch, func() interface{} {
-		if repo.License.Key == "" {
+			node_id = $2, name = $3, full_name = $4, owner_id = $5, description = $6, html_url = $7, homepage = $8, default_branch = $9, license_key = $10, readme_url = $11, created_at = $12, is_fork = $13, is_template = $14, is_archived = $15, is_disabled = $16, last_crawled_at = $17
+	`, repo.ID, repo.NodeID, repo.Name, repo.FullName, repo.Owner.ID, repo.Description, repo.HTMLURL, repo.Homepage, repo.DefaultBranch, func() interface{} {
+		if !repo.License.Key.Valid {
 			return nil
 		}
 		return repo.License.Key
@@ -186,10 +199,14 @@ func (pc *PostgresConnection) GetRepositoryByID(repoID int64) (models.Repository
 	var repo models.Repository
 	var ownerID int
 	var licenseKey sql.NullString
+	var repoNodeID sql.NullString
+	var ownerNodeID sql.NullString
+	var siteAdmin sql.NullBool
+	var licenseName sql.NullString
 
 	row := pc.DB.QueryRow(`
 		SELECT
-			r.id, r.node_id, r.name, r.full_name, r.owner_id, r.private, r.html_url, r.description, r.is_fork, r.url, r.created_at, r.updated_at, r.pushed_at, r.homepage, r.size, r.stargazers_count, r.watchers_count, r.language, r.forks_count, r.open_issues_count, r.default_branch, r.score, r.has_issues, r.has_projects, r.has_pages, r.has_wiki, r.has_downloads, r.has_discussions, r.is_archived, r.is_disabled, r.visibility, r.license_key, r.is_template, r.readme_url, r.last_crawled_at,
+			r.id, r.node_id, r.name, r.full_name, r.owner_id, r.description, r.html_url, r.homepage, r.default_branch, r.license_key, r.readme_url, r.created_at, r.is_fork, r.is_template, r.is_archived, r.is_disabled, r.last_crawled_at,
 			o.login, o.node_id, o.avatar_url, o.html_url, o.type, o.site_admin,
 			l.name, l.spdx_id, l.url, l.node_id
 		FROM
@@ -203,17 +220,33 @@ func (pc *PostgresConnection) GetRepositoryByID(repoID int64) (models.Repository
 	`, repoID)
 
 	err := row.Scan(
-		&repo.ID, &repo.NodeID, &repo.Name, &repo.FullName, &ownerID, &repo.Private, &repo.HTMLURL, &repo.Description, &repo.Fork, &repo.URL, &repo.CreatedAt, &repo.UpdatedAt, &repo.PushedAt, &repo.Homepage, &repo.Size, &repo.StargazersCount, &repo.WatchersCount, &repo.Language, &repo.ForksCount, &repo.OpenIssuesCount, &repo.DefaultBranch, &repo.Score, &repo.HasIssues, &repo.HasProjects, &repo.HasPages, &repo.HasWiki, &repo.HasDownloads, &repo.HasDiscussions, &repo.Archived, &repo.Disabled, &repo.Visibility, &licenseKey, &repo.IsTemplate, &repo.ReadmeURL, &repo.LastCrawledAt,
-		&repo.Owner.Login, &repo.Owner.NodeID, &repo.Owner.AvatarURL, &repo.Owner.HTMLURL, &repo.Owner.Type, &repo.Owner.SiteAdmin,
-		&repo.License.Name, &repo.License.SpdxID, &repo.License.URL, &repo.License.NodeID,
+		&repo.ID, &repoNodeID, &repo.Name, &repo.FullName, &ownerID, &repo.Description, &repo.HTMLURL, &repo.Homepage, &repo.DefaultBranch, &licenseKey, &repo.ReadmeURL, &repo.CreatedAt, &repo.Fork, &repo.IsTemplate, &repo.Archived, &repo.Disabled, &repo.LastCrawledAt,
+		&repo.Owner.Login, &ownerNodeID, &repo.Owner.AvatarURL, &repo.Owner.HTMLURL, &repo.Owner.Type, &siteAdmin,
+		&licenseName, &repo.License.SpdxID, &repo.License.URL, &repo.License.NodeID,
 	)
 
 	if err != nil {
 		return models.Repository{}, fmt.Errorf("failed to query repository: %w", err)
 	}
 
+	if repoNodeID.Valid {
+		repo.NodeID = repoNodeID
+	}
+
+	if ownerNodeID.Valid {
+		repo.Owner.NodeID = ownerNodeID
+	}
+
 	if licenseKey.Valid {
-		repo.License.Key = licenseKey.String
+		repo.License.Key = licenseKey
+	}
+
+	if licenseName.Valid {
+		repo.License.Name = licenseName
+	}
+
+	if siteAdmin.Valid {
+		repo.Owner.SiteAdmin = siteAdmin
 	}
 
 	// Fetch tags
@@ -290,7 +323,7 @@ func (pc *PostgresConnection) getLanguagesForRepository(repoID int64) (map[strin
 
 // GetRepositoryIDsUpdatedSince retrieves a list of repository IDs that have been updated since a given time.
 func (pc *PostgresConnection) GetRepositoryIDsUpdatedSince(since time.Time) ([]int64, error) {
-	rows, err := pc.DB.Query("SELECT id FROM repositories WHERE pushed_at >= $1", since)
+	rows, err := pc.DB.Query("SELECT id FROM repositories WHERE last_crawled_at >= $1", since)
 	if err != nil {
 		return nil, err
 	}

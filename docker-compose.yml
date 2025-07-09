@@ -35,21 +35,22 @@ services:
       retries: 5
 
   minio:
+    container_name: milvus-minio
     image: minio/minio:latest
-    container_name: minio_storage
-    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
     ports:
-      - "9000:9000"  # API port
-      - "9001:9001"  # Console UI
-    env_file:
-      - ./.env
+      - "9001:9001"
+      - "9000:9000"
     volumes:
-      - ./data/minio:/data
+      - ./data/minio:/minio_data
+    command: minio server /minio_data --console-address ":9001"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+      interval: 30s
+      timeout: 20s
+      retries: 3
 
   clickhouse:
     image: clickhouse/clickhouse-server:latest
@@ -77,65 +78,21 @@ services:
     ports:
       - "6379:6379"
     volumes:
-      - redis_data:/data
+      - ./data/redis:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
 
-  etcd:
-    image: quay.io/coreos/etcd:v3.5.12
-    container_name: etcd
-    command:
-      - etcd
-      - --name
-      - etcd-0
-      - --data-dir
-      - /etcd-data
-      - --listen-client-urls
-      - http://0.0.0.0:2379
-      - --advertise-client-urls
-      - http://etcd:2379
-      - --listen-peer-urls
-      - http://0.0.0.0:2380
-      - --initial-advertise-peer-urls
-      - http://etcd:2380
-      - --initial-cluster-token
-      - etcd-cluster-1
-      - --initial-cluster
-      - etcd-0=http://etcd:2380
-      - --initial-cluster-state
-      - new
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: qdrant_db
     ports:
-      - "2379:2379" # Client port
-      - "2380:2380" # Peer port
+      - "6333:6333"
+      - "6334:6334"
     volumes:
-      - etcd_data:/etcd-data # Persist data
-    healthcheck:
-      test: ["CMD", "etcdctl", "get", "/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  milvus:
-    image: milvusdb/milvus:v2.2.13
-    platform: linux/amd64
-    container_name: milvus_db
-    ports:
-      - "19530:19530"
-    volumes:
-      - milvus_data:/milvus/data
-    depends_on:
-      etcd: { condition: service_healthy }
-      minio: { condition: service_healthy }
-    command: "/tini -- milvus run standalone"
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
-      interval: 30s
-      timeout: 20s
-      retries: 3
-      start_period: 90s
+      - ./data/qdrant:/qdrant/storage
 
   # --- APPLICATION SERVICES (Golang) ---
 
@@ -169,7 +126,7 @@ services:
       dockerfile: ./cmd/crawler/Dockerfile
     # Let's say we want to run 3 crawler instances
     deploy:
-      replicas: 3
+      replicas: 6
     depends_on:
       rabbitmq: { condition: service_healthy }
     restart: unless-stopped
@@ -180,10 +137,12 @@ services:
     build:
       context: .
       dockerfile: ./cmd/processor/Dockerfile
-    container_name: processor
+    deploy:
+      replicas: 3
     depends_on:
       rabbitmq: { condition: service_healthy }
       postgres: { condition: service_healthy }
+      clickhouse: { condition: service_healthy }
     restart: unless-stopped
     env_file:
       - ./.env
@@ -214,7 +173,7 @@ services:
       rabbitmq: { condition: service_healthy }
       postgres: { condition: service_healthy }
       minio: { condition: service_healthy }
-      milvus: { condition: service_healthy }
+      qdrant: { condition: service_started }
     restart: unless-stopped
     env_file:
       - ./.env
@@ -226,7 +185,7 @@ services:
     container_name: similarity_engine_service
     depends_on:
       postgres: { condition: service_healthy }
-      milvus: { condition: service_healthy }
+      qdrant: { condition: service_started }
       redis: { condition: service_healthy }
     restart: unless-stopped
     env_file:

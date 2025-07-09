@@ -1,6 +1,12 @@
 package config
 
-import "os"
+import (
+	"fmt"
+	"os"
+	"strconv"
+	"strings"
+	"time"
+)
 
 // Config holds application configuration.
 type Config struct {
@@ -25,12 +31,45 @@ type Config struct {
 	RedisPassword      string
 	MilvusHost         string
 	MilvusPort         string
-	LastUpdateCut      string
-	SimilarityListSize string
+	LastUpdateCut      time.Duration
+	SimilarityListSize int
+}
+
+// ParseDuration parses a duration string with support for "months".
+func ParseDuration(durationStr string) (time.Duration, error) {
+	if strings.HasSuffix(durationStr, " months") {
+		monthsStr := strings.TrimSuffix(durationStr, " months")
+		months, err := strconv.Atoi(monthsStr)
+		if err != nil {
+			return 0, fmt.Errorf("invalid number of months: %s", monthsStr)
+		}
+		return time.Duration(months) * 30 * 24 * time.Hour, nil
+	}
+	if strings.HasSuffix(durationStr, " years") {
+		yearsStr := strings.TrimSuffix(durationStr, " years")
+		years, err := strconv.Atoi(yearsStr)
+		if err != nil {
+			return 0, fmt.Errorf("invalid number of years: %s", yearsStr)
+		}
+		return time.Duration(years) * 365 * 24 * time.Hour, nil
+	}
+	return time.ParseDuration(durationStr)
 }
 
 // Load loads configuration from the environment.
 func Load() (*Config, error) {
+	lastUpdateCutStr := os.Getenv("LAST_UPDATE_CUT")
+	lastUpdateCut, err := ParseDuration(lastUpdateCutStr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid LAST_UPDATE_CUT duration: %w", err)
+	}
+
+	similarityListSizeStr := os.Getenv("SIMILARITY_LIST_SIZE")
+	similarityListSize, err := strconv.Atoi(similarityListSizeStr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid SIMILARITY_LIST_SIZE: %w", err)
+	}
+
 	config := &Config{
 		RabbitMQURL:        os.Getenv("RABBITMQ_URL"),
 		RabbitMQUser:       os.Getenv("RABBITMQ_DEFAULT_USER"),
@@ -53,8 +92,8 @@ func Load() (*Config, error) {
 		RedisPassword:      os.Getenv("REDIS_PASSWORD"),
 		MilvusHost:         os.Getenv("MILVUS_HOST"),
 		MilvusPort:         os.Getenv("MILVUS_PORT"),
-		LastUpdateCut:      os.Getenv("LAST_UPDATE_CUT"),
-		SimilarityListSize: os.Getenv("SIMILARITY_LIST_SIZE"),
+		LastUpdateCut:      lastUpdateCut,
+		SimilarityListSize: similarityListSize,
 	}
 
 	if os.Getenv("LOCAL_ENV") == "true" {

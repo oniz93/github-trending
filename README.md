@@ -1,73 +1,40 @@
-# GitHub Trending Microservices
+# GitHub Trending
 
-This project implements a system of microservices designed to track and analyze trending GitHub repositories. It leverages a robust, one-way data flow to discover, crawl, process, and serve data related to popular open-source projects.
+This project is a microservices-based application that discovers, analyzes, and displays trending repositories on GitHub.
 
-## Architecture Overview
+## Architecture
 
-The system is composed of five core microservices, each with a distinct responsibility:
+The application is composed of the following microservices:
 
--   **`discovery-service`**: Finds new repositories to track using the GitHub Search API.
--   **`scheduler-service`**: Schedules refreshes for already tracked repositories.
--   **`crawler-service`**: Fetches raw data from the GitHub API for specified repositories.
--   **`processor-service`**: Parses, cleans, and saves raw data to various databases.
--   **`api-server`**: Provides a public-facing API for querying trending data.
--   **`embedding-service`**: Converts repository READMEs into semantic vectors (embeddings) and stores them in Milvus.
--   **`similarity-engine-service`**: Pre-calculates and stores repository similarity lists in Redis for fast retrieval.
+*   **`discovery-service`**: Finds new repositories to track.
+*   **`scheduler-service`**: Schedules refreshes for repositories that are already being tracked.
+*   **`crawler-service`**: Fetches repository data from the GitHub API.
+*   **`processor-service`**: Processes and stores repository data in the appropriate databases.
+*   **`embedding-service`**: Generates and stores semantic embeddings for repository READMEs.
+*   **`similarity-engine-service`**: Calculates and stores similarity scores between repositories.
+*   **`api-server`**: Provides a public API for accessing trending repository data.
 
-For a detailed explanation of the architecture and data flow, please refer to [GEMINI.md](./GEMINI.md).
+This design creates a robust, one-way data flow:
 
-## Local Development Setup
+`Discovery/Scheduler` -> `Crawl Queue` -> `Crawler` -> `Process Queue` -> `Processor` -> `Databases` <- `API Server`
+                                                                                                `Processor` -> `Embeddings Queue` -> `Embedding Service` -> `Milvus`
+                                                                                                `Similarity Engine` -> `Milvus` -> `Redis`
 
-This project uses Docker Compose for a streamlined local development environment.
+## Getting Started
 
-### Prerequisites
+To get started, you will need to have Docker and Docker Compose installed.
 
--   [Docker Desktop](https://www.docker.com/products/docker-desktop) (or Docker Engine and Docker Compose)
--   [Go](https://golang.org/dl/) (for developing the Go microservices)
+1.  Clone the repository.
+2.  Create a `.env` file in the root of the project and populate it with your environment variables. You can use the `.env.example` file as a template.
+3.  Run the following command to build and start the application:
 
-### Setup Steps
-
-1.  **Clone the repository:**
     ```bash
-    git clone https://github.com/your-username/github-trending.git
-    cd github-trending
+    docker-compose up --build -d
     ```
-
-2.  **Initialize Go Module:**
-    ```bash
-    go mod tidy
-    ```
-
-3.  **Create `.env` file:**
-    Create a `.env` file in the root of your project to store environment variables common to all services. An example is provided in [GEMINI.md](./GEMINI.md).
-
-4.  **Build and Run Services:**
-    The `docker-compose.yml` file defines all the necessary infrastructure (RabbitMQ, PostgreSQL, MinIO, ClickHouse, Redis, Milvus) and the Go microservices. To build the Go services and start all containers, run:
-    ```bash
-    docker-compose up --build
-    ```
-    This command will build the Docker images for each Go service and then start all defined services in the foreground. You can add `-d` to run them in detached mode (background).
-
-### Accessing Services and UIs
-
-Once the services are running, you can access the following:
-
--   **RabbitMQ Management UI**: `http://localhost:15672` (User: `user`, Pass: `password`)
--   **MinIO Console UI**: `http://localhost:9001` (User: `minioadmin`, Pass: `minioadmin`)
--   **PostgreSQL**: Connect to `localhost:5432` (User: `user`, Password: `password`, Database: `github_meta`)
--   **ClickHouse**: HTTP interface at `http://localhost:8123`, Native client interface at `localhost:9009` (User: `clickhouse`, Password: `clickhouse`)
--   **Redis**: Connect to `localhost:6379`
--   **Milvus**: Connect to `localhost:19530`
--   **API Server**: `http://localhost:8080`
-
-## API Endpoints
-
--   `GET /retrieveList?sessionId=<session_id>&languages=<language1>,<language2>&tags=<tag1>,<tag2>&page=<page>`: Retrieves a paginated list of trending repositories, filtered by languages and tags. If `sessionId` is not provided, a new session is created.
--   `POST /trackOpenRepository`: Tracks a user's click on a repository. The request body should be a JSON object with `sessionId` and `repositoryId` fields.
 
 ## Project Structure
 
-The project follows a monorepo approach with a clear structure:
+Your project layout will look like this:
 
 ```
 github-trending/
@@ -75,26 +42,64 @@ github-trending/
 ├── docker-compose.yml
 ├── go.mod
 ├── go.sum
-├── cmd/             # Contains main entry points for each microservice
+├── cmd/
 │   ├── api/
+│   │   ├── Dockerfile
+│   │   └── main.go
 │   ├── crawler/
+│   │   ├── Dockerfile
+│   │   └── main.go
 │   ├── discovery/
+│   │   ├── Dockerfile
+│   │   └── main.go
 │   ├── embedding-service/
+│   │   ├── Dockerfile
+│   │   └── main.go
 │   ├── processor/
+│   │   ├── Dockerfile
+│   │   └── main.go
 │   ├── scheduler/
+│   │   ├── Dockerfile
+│   │   └── main.go
 │   └── similarity-engine-service/
-├── internal/        # Shared internal Go packages (config, database, github client, messaging, models)
-│   ├── config/
+│       ├── Dockerfile
+│       └── main.go
+├── internal/
+│   ├── config/          # Load config from ENV vars
+│   │   └── config.go
 │   ├── database/
-│   ├── github/
-│   ├── messaging/
-│   └── models/
-└── GEMINI.md        # Detailed architectural and setup documentation
+│   │   ├── clickhouse.go
+│   │   ├── milvus.go
+│   │   ├── minio.go
+│   │   ├── postgres.go
+│   │   └── redis.go
+│   ├── github/          # Your GitHub API client wrapper
+│   │   └── client.go
+│   ├── messaging/       # RabbitMQ logic
+│   │   └── rabbitmq.go
+│   └── models/          # Your core data structs
+│       └── repository.go
+└── storage/
+    ├── postgres/
+    │   └── schema.sql
+    └── clickhouse/
+        └── schema.sql
 ```
 
-For a more in-depth look at the project structure and Go code design, please refer to [GEMINI.md](./GEMINI.md).
+**Explanation:**
 
-## Contributing
+*   **`cmd/`**: This is the standard Go layout for applications. Each subdirectory is a self-contained microservice with its own `main.go` entrypoint.
+*   **`internal/`**: This is for shared code that is *internal* to your project. Go's tooling prevents other projects from importing packages from an `internal` directory. This is perfect for our shared database clients, models, and messaging logic.
+    *   **`config`**: A package to read configuration (like `RABBITMQ_URL`) from environment variables.
+    *   **`database`**: Contains functions to connect to and query PostgreSQL, ClickHouse, Redis, MinIO, and Milvus.
+    *   **`github`**: You should build your own small wrapper around the GitHub API client. This lets you centralize rate limiting logic, error handling, and authentication.
+    *   **`messaging`**: Functions to connect to RabbitMQ, publish messages to a queue, and consume messages from a queue.
+    *   **`models`**: The definition of your core data types (e.g., `RepositoryStats`, `RepositoryMeta`).
+*   **`storage/`**: Contains the database schema files.
 
-(Optional: Add guidelines for contributing, e.g., code style, testing, pull request process.)
+## Summary of Changes (2025-07-08)
 
+*   **Refactored Database Schema:** Separated repository metadata (stored in PostgreSQL) from time-series statistics (stored in ClickHouse) to improve performance and scalability.
+*   **Fixed Data Ingestion Pipeline:** Corrected several bugs in the data ingestion pipeline that were causing errors and preventing data from being processed correctly.
+*   **Improved Configuration Handling:** Updated the configuration loading logic to correctly parse custom duration units.
+*   **Updated Documentation:** Updated the `GEMINI.md` and `README.md` files to reflect the latest architectural changes and fixes.

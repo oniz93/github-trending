@@ -19,7 +19,7 @@ func main() {
 		log.Fatalf("Failed to connect to Redis: %v", err)
 	}
 
-	postgresConnection, err := database.NewPostgresConnection(cfg.PostgresHost, cfg.PostgresUser, cfg.PostgresPassword, cfg.PostgresDB)
+	postgresConnection, err := database.NewPostgresConnection(cfg.PostgresHost, "5432", cfg.PostgresUser, cfg.PostgresPassword, cfg.PostgresDB)
 	if err != nil {
 		log.Fatalf("Failed to connect to Postgres: %v", err)
 	}

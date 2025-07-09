@@ -41,7 +41,7 @@ func main() {
 	}
 	defer mqConnection.Close()
 
-	githubClient = github.NewGitHubClient(cfg.GitHubToken)
+	githubClient = github.NewGitHubClient(cfg.GitHubToken, nil)
 
 	log.Println("Discovery service started.")
 
