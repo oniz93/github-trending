@@ -12,15 +12,15 @@ Here are the seven core microservices we will build:
 2.  **`scheduler-service`**: Its only job is to schedule *refreshes* for repositories we already track. It will run continuously, query our own database for repositories that haven't been updated recently, and push their URLs to the same queue as the discovery service.
 3.  **`crawler-service`**: This is a simple worker. It pulls a repository URL from the queue, fetches all the necessary data from the GitHub API (stats, languages, README URL, etc.), and pushes the raw, unprocessed data to another queue.
 4.  **`processor-service`**: This is another worker. It pulls raw data from the crawler's output queue, parses and cleans it, then saves it to the appropriate databases (time-series stats to ClickHouse, metadata to PostgreSQL, and READMEs to MinIO). It also triggers the `embedding-service` when a new README is processed.
-5.  **`embedding-service`**: This service consumes messages about new READMEs, downloads their content (from MinIO or directly from GitHub), generates semantic embeddings using a pre-trained model, and stores these vectors in Milvus (our vector database).
-6.  **`similarity-engine-service`**: This service runs periodically, fetches repository embeddings from Milvus, calculates similarity scores between repositories, and stores pre-computed similarity lists in Redis for fast retrieval by the API server.
+5.  **`embedding-service`**: This service consumes messages about new READMEs, downloads their content (from MinIO or directly from GitHub), generates semantic embeddings using a pre-trained model, and stores these vectors in Qdrant (our vector database).
+6.  **`similarity-engine-service`**: This service runs periodically, fetches repository embeddings from Qdrant, calculates similarity scores between repositories, and stores pre-computed similarity lists in Redis for fast retrieval by the API server.
 7.  **`api-server`**: This is the public-facing service. It listens for HTTP requests from your web application, queries the databases to calculate trending data, and returns it as a clean JSON response. It now also provides personalized recommendations based on user interaction history, leveraging pre-computed similarity lists from Redis.
 
 This design creates a robust, one-way data flow:
 
 `Discovery/Scheduler` -> `Crawl Queue` -> `Crawler` -> `Process Queue` -> `Processor` -> `Databases` <- `API Server`
-                                                                                                `Processor` -> `Embeddings Queue` -> `Embedding Service` -> `Milvus`
-                                                                                                `Similarity Engine` -> `Milvus` -> `Redis`
+                                                                                                `Processor` -> `Embeddings Queue` -> `Embedding Service` -> `Qdrant`
+                                                                                                `Similarity Engine` -> `Qdrant` -> `Redis`
 
 ### Part 2: Local Development Setup with Docker Compose
 
@@ -87,9 +87,9 @@ REDIS_HOST=redis_cache
 REDIS_PORT=6379
 REDIS_PASSWORD=
 
-# Milvus Credentials
-MILVUS_HOST=milvus_db
-MILVUS_PORT=19530
+# Qdrant Credentials
+QDRANT_HOST=qdrant_db
+QDRANT_PORT=6333
 
 # Recommendation Engine Configuration
 LAST_UPDATE_CUT=24 months
@@ -187,13 +187,13 @@ services:
       timeout: 5s
       retries: 5
 
-  milvus:
-    image: milvusdb/milvus:v2.2.0-standalone
-    container_name: milvus_db
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: qdrant_db
     ports:
-      - "19530:19530"
+      - "6333:6333"
     volumes:
-      - milvus_data:/milvus/data
+      - qdrant_data:/qdrant/storage
 
   # --- APPLICATION SERVICES (Golang) ---
 
@@ -272,7 +272,7 @@ services:
       rabbitmq: { condition: service_healthy }
       postgres: { condition: service_healthy }
       minio: { condition: service_healthy }
-      milvus: { condition: service_healthy }
+      qdrant: { condition: service_healthy }
     restart: unless-stopped
     env_file:
       - ./.env
@@ -284,7 +284,7 @@ services:
     container_name: similarity_engine_service
     depends_on:
       postgres: { condition: service_healthy }
-      milvus: { condition: service_healthy }
+      qdrant: { condition: service_healthy }
       redis: { condition: service_healthy }
     restart: unless-stopped
     env_file:
@@ -296,7 +296,7 @@ volumes:
   minio_data:
   clickhouse_data:
   redis_data:
-  milvus_data:
+  qdrant_data:
 ```
 
 #### Step 4: Generic Go `Dockerfile`
@@ -400,7 +400,7 @@ github-trending/
 │   │   └── config.go
 │   ├── database/
 │   │   ├── clickhouse.go
-│   │   ├── milvus.go
+│   │   ├── qdrant.go
 │   │   ├── minio.go
 │   │   ├── postgres.go
 │   │   └── redis.go
@@ -422,7 +422,7 @@ github-trending/
 *   **`cmd/`**: This is the standard Go layout for applications. Each subdirectory is a self-contained microservice with its own `main.go` entrypoint.
 *   **`internal/`**: This is for shared code that is *internal* to your project. Go's tooling prevents other projects from importing packages from an `internal` directory. This is perfect for our shared database clients, models, and messaging logic.
     *   **`config`**: A package to read configuration (like `RABBITMQ_URL`) from environment variables.
-    *   **`database`**: Contains functions to connect to and query PostgreSQL, ClickHouse, Redis, MinIO, and Milvus.
+    *   **`database`**: Contains functions to connect to and query PostgreSQL, ClickHouse, Redis, MinIO, and Qdrant.
     *   **`github`**: You should build your own small wrapper around the GitHub API client. This lets you centralize rate limiting logic, error handling, and authentication.
     *   **`messaging`**: Functions to connect to RabbitMQ, publish messages to a queue, and consume messages from a queue.
     *   **`models`**: The definition of your core data types (e.g., `RepositoryStats`, `RepositoryMeta`).
@@ -458,7 +458,7 @@ func main() {
 	}
 
 	// 3. Connect to PostgreSQL
-	postgresConnection, err := database.NewPostgresConnection(cfg.PostgresHost, cfg.PostgresUser, cfg.PostgresPassword, cfg.PostgresDB)
+	postgresConnection, err := database.NewPostgresConnection(cfg.PostgresHost, "5432", cfg.PostgresUser, cfg.PostgresPassword, cfg.PostgresDB)
 	if err != nil {
 		log.Fatalf("Failed to connect to Postgres: %v", err)
 	}
@@ -479,6 +479,7 @@ package api
 import (
 	"context"
 	"fmt"
+	"log"
 	"net/http"
 	"sort"
 	"strconv"
@@ -664,9 +665,14 @@ You will see Docker build each of your Go services and then start all the contai
 
 This setup gives you a complete, professional foundation. You can now focus on writing the Go logic inside each microservice, knowing that the infrastructure and communication layer is already handled.
 
-### Summary of Changes (2025-07-08)
+### Summary of Changes (2025-07-09)
 
-*   **Refactored Database Schema:** Separated repository metadata (stored in PostgreSQL) from time-series statistics (stored in ClickHouse) to improve performance and scalability.
-*   **Fixed Data Ingestion Pipeline:** Corrected several bugs in the data ingestion pipeline that were causing errors and preventing data from being processed correctly.
-*   **Improved Configuration Handling:** Updated the configuration loading logic to correctly parse custom duration units.
-*   **Updated Documentation:** Updated the `GEMINI.md` and `README.md` files to reflect the latest architectural changes and fixes.
+*   **Replaced Milvus with Qdrant:** The vector database has been changed from Milvus to Qdrant for storing README embeddings.
+*   **Added `similarity-engine-service`:** This service calculates and stores similarity scores between repositories.
+*   **Enhanced API Server:** The API server now provides personalized recommendations based on user history and uses Redis for caching.
+*   **Improved Discovery Service:** The discovery service now uses a lock file to resume discovery and a trigger file to start discovery immediately.
+*   **Improved Crawler Service:** The crawler service now checks if a repository has been updated before crawling it.
+*   **Refactored Processor Service:** The processor service has been refactored into its own package.
+*   **Updated Configuration Handling:** The configuration loading logic now correctly parses custom duration units for "months" and "years".
+*   **Updated Data Models:** The data models have been updated to include more fields and new message structs have been added.
+*   **Improved GitHub Client:** The GitHub client now includes a backoff mechanism to handle rate limiting.

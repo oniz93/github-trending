@@ -4,15 +4,19 @@ import (
 	"context"
 	"encoding/json"
 	qdrant_go_client "github.com/qdrant/go-client/qdrant"
+	"github.com/streadway/amqp"
 	"io"
 	"log"
 	"net/http"
+	"sync"
 
 	"github.com/teomiscia/github-trending/internal/config"
 	"github.com/teomiscia/github-trending/internal/database"
 	"github.com/teomiscia/github-trending/internal/messaging"
 	"github.com/teomiscia/github-trending/internal/models"
 )
+
+const numWorkers = 100
 
 func main() {
 	cfg, err := config.Load()
@@ -57,22 +61,39 @@ func main() {
 		log.Fatalf("Failed to start consuming from queue %s: %v", readmeEmbedQueueName, err)
 	}
 
+	var wg sync.WaitGroup
+	jobs := make(chan amqp.Delivery, 100)
+
+	for i := 0; i < numWorkers; i++ {
+		wg.Add(1)
+		go worker(i, &wg, jobs, pgConnection, minioConnection, qdrantConnection)
+	}
+
 	log.Printf("Embedding service started. Waiting for messages on queue: %s", readmeEmbedQueueName)
 
 	for d := range msgs {
+		jobs <- d
+	}
+
+	wg.Wait()
+}
+
+func worker(id int, wg *sync.WaitGroup, jobs <-chan amqp.Delivery, pgConnection *database.PostgresConnection, minioConnection *database.MinioConnection, qdrantConnection *database.QdrantConnection) {
+	defer wg.Done()
+	for d := range jobs {
 		var embedMsg models.ReadmeEmbedMessage
 		if err := json.Unmarshal(d.Body, &embedMsg); err != nil {
-			log.Printf("Failed to unmarshal message: %v", err)
+			log.Printf("Worker %d: Failed to unmarshal message: %v", id, err)
 			d.Ack(false)
 			continue
 		}
 
-		log.Printf("Received message to embed README for repository ID: %d", embedMsg.RepositoryID)
+		log.Printf("Worker %d: Received message to embed README for repository ID: %d", id, embedMsg.RepositoryID)
 
 		// 1. Query PostgreSQL for repository metadata (pushed_at)
 		repo, err := pgConnection.GetRepositoryByID(embedMsg.RepositoryID)
 		if err != nil {
-			log.Printf("Failed to get repository by ID %d from Postgres: %v", embedMsg.RepositoryID, err)
+			log.Printf("Worker %d: Failed to get repository by ID %d from Postgres: %v", id, embedMsg.RepositoryID, err)
 			d.Nack(false, true) // Requeue for retry
 			continue
 		}
@@ -80,25 +101,25 @@ func main() {
 		// 3. Fetch README content from MinIO
 		readmeContent, err := minioConnection.GetFile(context.Background(), embedMsg.MinioPath)
 		if err != nil {
-			log.Printf("Failed to get README from MinIO for %s: %v", embedMsg.MinioPath, err)
+			log.Printf("Worker %d: Failed to get README from MinIO for %s: %v", id, embedMsg.MinioPath, err)
 			// 4. Fallback: Download README directly if not in MinIO
-			if repo.ReadmeURL.Valid {
-				log.Printf("Attempting to download README from %s", repo.ReadmeURL)
+			if repo.ReadmeURL.Valid && repo.ReadmeURL.String != "" {
+				log.Printf("Worker %d: Attempting to download README from %s", id, repo.ReadmeURL.String)
 				resp, httpErr := http.Get(repo.ReadmeURL.String)
 				if httpErr != nil || resp.StatusCode != http.StatusOK {
-					log.Printf("Failed to download README from URL %s: %v", repo.ReadmeURL, httpErr)
+					log.Printf("Worker %d: Failed to download README from URL %s: %v", id, repo.ReadmeURL.String, httpErr)
 					d.Nack(false, true)
 					continue
 				}
 				defer resp.Body.Close()
 				readmeContent, err = io.ReadAll(resp.Body)
 				if err != nil {
-					log.Printf("Failed to read downloaded README content: %v", err)
+					log.Printf("Worker %d: Failed to read downloaded README content: %v", id, err)
 					d.Nack(false, true)
 					continue
 				}
 			} else {
-				log.Printf("No README URL available for repo %d, skipping embedding.", embedMsg.RepositoryID)
+				log.Printf("Worker %d: No README URL available for repo %d, skipping embedding.", id, embedMsg.RepositoryID)
 				d.Ack(false)
 				continue
 			}
@@ -116,12 +137,12 @@ func main() {
 			},
 		}
 		if err := qdrantConnection.UpsertVectors(context.Background(), "repositories", points); err != nil {
-			log.Printf("Failed to insert embedding for repo %d into Qdrant: %v", embedMsg.RepositoryID, err)
+			log.Printf("Worker %d: Failed to insert embedding for repo %d into Qdrant: %v", id, embedMsg.RepositoryID, err)
 			d.Nack(false, true) // Requeue for retry
 			continue
 		}
 
-		log.Printf("Successfully processed and embedded README for repository ID: %d", embedMsg.RepositoryID)
+		log.Printf("Worker %d: Successfully processed and embedded README for repository ID: %d", id, embedMsg.RepositoryID)
 		d.Ack(false)
 	}
 }

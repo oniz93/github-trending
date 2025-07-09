@@ -3,11 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"log"
-	"os"
-	"strconv"
-	"strings"
 	"time"
 
 	"github.com/teomiscia/github-trending/internal/config"
@@ -17,15 +13,13 @@ import (
 )
 
 const (
-	maxStars        = 1000000 // A reasonable upper bound for stars
-	minStars        = 50      // The minimum stars to be considered
-	lockFilePath    = "/tmp/discovery.lock"
-	triggerFilePath = "/root/trigger_discovery"
+	maxStars = 1000000 // A reasonable upper bound for stars
+	minStars = 50      // The minimum stars to be considered
 )
 
 var (
 	githubClient   *github.GitHubClient
-	mqConnection   *messaging.Connection
+	mqConnection   messaging.MQConnection
 	crawlQueueName = "repos_to_crawl"
 )
 
@@ -45,48 +39,27 @@ func main() {
 
 	log.Println("Discovery service started.")
 
-	for {
-		if fileExists(triggerFilePath) {
-			log.Println("Trigger file found. Starting discovery immediately.")
-			if err := os.Remove(triggerFilePath); err != nil {
-				log.Printf("Failed to remove trigger file: %v", err)
-			}
-			discoverRepositories(minStars, maxStars)
-		} else {
-			minLock, maxLock, err := readLockFile()
-			if err != nil {
-				log.Printf("No lock file found. Waiting until midnight to start.")
-				waitUntilMidnight()
-				minLock, maxLock = minStars, maxStars
-			} else {
-				log.Printf("Found lock file. Resuming discovery from %d to %d stars.", minLock, maxLock)
-			}
-			discoverRepositories(minLock, maxLock)
-		}
+	// Run discovery on startup
+	runDiscovery()
 
-		if err := removeLockFile(); err != nil {
-			log.Printf("Failed to remove lock file: %v", err)
-		}
+	// Then run discovery every 24 hours
+	ticker := time.NewTicker(24 * time.Hour)
+	defer ticker.Stop()
 
-		log.Println("Finished a discovery cycle. Waiting for the next one.")
+	for range ticker.C {
+		runDiscovery()
 	}
 }
 
-func fileExists(filename string) bool {
-	info, err := os.Stat(filename)
-	if os.IsNotExist(err) {
-		return false
-	}
-	return !info.IsDir()
+func runDiscovery() {
+	log.Println("Starting discovery process...")
+	discoverRepositories(minStars, maxStars)
+	log.Println("Finished a discovery cycle. Waiting for the next one.")
 }
 
 func discoverRepositories(minQuery, maxQuery int) {
 	if minQuery > maxQuery {
 		return
-	}
-
-	if err := writeLockFile(minQuery, maxQuery); err != nil {
-		log.Printf("Failed to write lock file: %v", err)
 	}
 
 	// Base case: If the range has collapsed, fetch results for the single star count.
@@ -156,42 +129,4 @@ func fetchAllAndPublish(query string) {
 
 		page++
 	}
-}
-
-func writeLockFile(minQuery, maxQuery int) error {
-	return ioutil.WriteFile(lockFilePath, []byte(fmt.Sprintf("%d,%d", minQuery, maxQuery)), 0644)
-}
-
-func readLockFile() (int, int, error) {
-	data, err := ioutil.ReadFile(lockFilePath)
-	if err != nil {
-		return 0, 0, err
-	}
-
-	parts := strings.Split(string(data), ",")
-	if len(parts) != 2 {
-		return 0, 0, fmt.Errorf("invalid lock file format")
-	}
-
-	minQuery, err := strconv.Atoi(parts[0])
-	if err != nil {
-		return 0, 0, err
-	}
-
-	maxQuery, err := strconv.Atoi(parts[1])
-	if err != nil {
-		return 0, 0, err
-	}
-
-	return minQuery, maxQuery, nil
-}
-
-func removeLockFile() error {
-	return os.Remove(lockFilePath)
-}
-
-func waitUntilMidnight() {
-	now := time.Now()
-	midnight := time.Date(now.Year(), now.Month(), now.Day()+1, 0, 0, 0, 0, now.Location())
-	time.Sleep(midnight.Sub(now))
 }
