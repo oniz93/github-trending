@@ -24,7 +24,7 @@ func main() {
 		log.Fatalf("Failed to connect to Postgres: %v", err)
 	}
 
-	clickhouseConnection, err := database.NewClickHouseConnection(cfg.ClickhouseHost, cfg.ClickhousePort, cfg.ClickhouseUser, cfg.ClickhousePassword, cfg.ClickhouseDB)
+	clickhouseConnection, err := database.NewClickHouseConnection(cfg.ClickHouseHost, cfg.ClickHousePort, cfg.ClickHouseUser, cfg.ClickHousePassword, cfg.ClickHouseDB)
 	if err != nil {
 		log.Fatalf("Failed to connect to ClickHouse: %v", err)
 	}

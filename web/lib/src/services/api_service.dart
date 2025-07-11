@@ -1,51 +1,46 @@
+// web/lib/src/services/api_service.dart
 import 'dart:convert';
-import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:http/http.dart' as http;
-import 'package:github_trending_app/src/providers/session_provider.dart';
-
-final apiServiceProvider = Provider<ApiService>((ref) {
-  return ApiService(ref);
-});
+import 'package:github_trending_app/src/models/repository.dart';
 
 class ApiService {
-  final Ref _ref;
-  final String _baseUrl = 'http://localhost:8080'; // Adjust if your API is hosted elsewhere
+  final String baseUrl;
 
-  ApiService(this._ref);
+  ApiService({this.baseUrl = 'http://localhost:8080'});
 
-  Future<Map<String, dynamic>> retrieveList() async {
-    final sessionState = _ref.read(sessionProvider);
-    final sessionId = sessionState.sessionId;
-
-    final uri = Uri.parse('$_baseUrl/retrieveList').replace(
-      queryParameters: {
-        if (sessionId != null) 'sessionId': sessionId,
-      },
-    );
+  Future<Map<String, dynamic>> fetchRepositories({
+    String? sessionId,
+    List<String>? languages,
+    List<String>? tags,
+    int page = 0,
+  }) async {
+    final uri = Uri.parse('$baseUrl/retrieveList').replace(queryParameters: {
+      if (sessionId != null) 'sessionId': sessionId,
+      if (languages != null && languages.isNotEmpty) 'languages': languages.join(','),
+      if (tags != null && tags.isNotEmpty) 'tags': tags.join(','),
+      'page': page.toString(),
+    });
 
     final response = await http.get(uri);
 
     if (response.statusCode == 200) {
-      final data = json.decode(response.body);
-      await _ref.read(sessionProvider.notifier).updateSession(data['sessionId']);
+      final Map<String, dynamic> data = json.decode(response.body);
       return data;
     } else {
-      throw Exception('Failed to retrieve list');
+      throw Exception('Failed to load repositories');
     }
   }
 
-  Future<void> trackOpenRepository(int repositoryId) async {
-    final sessionId = _ref.read(sessionProvider).sessionId;
-    if (sessionId == null) return; // Or handle error
-
-    final uri = Uri.parse('$_baseUrl/trackOpenRepository');
-    await http.post(
+  Future<void> trackOpenRepository(String sessionId, int repositoryId) async {
+    final uri = Uri.parse('$baseUrl/trackOpenRepository');
+    final response = await http.post(
       uri,
       headers: {'Content-Type': 'application/json'},
-      body: json.encode({
-        'sessionId': sessionId,
-        'repositoryId': repositoryId,
-      }),
+      body: json.encode({'sessionId': sessionId, 'repositoryId': repositoryId}),
     );
+
+    if (response.statusCode != 200) {
+      throw Exception('Failed to track repository open event');
+    }
   }
 }
