@@ -71,3 +71,17 @@ func (ch *ClickHouseConnection) InsertRepositoryStats(repo models.Repository) er
 
 	return tx.Commit()
 }
+
+// GetLastUpdateForRepository retrieves the last update timestamp for a given repository from ClickHouse.
+func (ch *ClickHouseConnection) GetLastUpdateForRepository(repoID int64) (time.Time, error) {
+	var lastUpdate time.Time
+	query := "SELECT event_time FROM repository_stats WHERE repository_id = ? ORDER BY event_time DESC LIMIT 1"
+	err := ch.DB.QueryRow(query, repoID).Scan(&lastUpdate)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return time.Time{}, nil // No data for this repository
+		}
+		return time.Time{}, err
+	}
+	return lastUpdate, nil
+}

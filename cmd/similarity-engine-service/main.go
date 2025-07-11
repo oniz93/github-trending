@@ -108,8 +108,8 @@ func worker(id int, wg *sync.WaitGroup, jobs <-chan int64, qdrantConnection *dat
 
 func processRepository(repoID int64, qdrantConnection *database.QdrantConnection, redisClient *redis.Client, cfg *config.Config, pgConnection *database.PostgresConnection, mqConnection messaging.MQConnection) {
 	// 2. For each repository_id, query Qdrant to get its embedding vector.
-	searchRes, err := qdrantConnection.Search(context.Background(), "repositories", []float32{}, 1) // Search for the point itself
-	if err != nil || len(searchRes) == 0 || searchRes[0].GetId().GetNum() != uint64(repoID) {
+	vectors, err := qdrantConnection.GetVectors(context.Background(), "repositories", []uint64{uint64(repoID)})
+	if err != nil || len(vectors) == 0 {
 		log.Printf("Failed to get embedding for repo %d from Qdrant: %v", repoID, err)
 		// If the embedding is not found, send a message to the readme_to_embed queue
 		embedMsg := models.ReadmeEmbedMessage{
@@ -127,7 +127,7 @@ func processRepository(repoID int64, qdrantConnection *database.QdrantConnection
 		}
 		return
 	}
-	embedding := searchRes[0].GetVectors().GetVector().GetData()
+	embedding := vectors[0].GetVectors().GetVector().GetData()
 
 	// 3. Perform a similarity search in Qdrant using that vector to find the top N nearest neighbors.
 	searchResults, err := qdrantConnection.Search(context.Background(), "repositories", embedding, uint64(cfg.SimilarityListSize))

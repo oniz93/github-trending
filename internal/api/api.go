@@ -15,16 +15,25 @@ import (
 	"github.com/teomiscia/github-trending/internal/database"
 )
 
-func NewServer(redisClient *redis.Client, db *database.PostgresConnection) *gin.Engine {
+import (
+	"github.com/gin-contrib/cors"
+)
+
+func NewServer(redisClient *redis.Client, pgdb *database.PostgresConnection, chdb *database.ClickHouseConnection) *gin.Engine {
 	router := gin.Default()
 
-	router.GET("/retrieveList", handleRetrieveList(redisClient, db))
-	router.POST("/trackOpenRepository", handleTrackOpenRepository(db))
+	// Add CORS middleware
+	config := cors.DefaultConfig()
+	config.AllowAllOrigins = true
+	router.Use(cors.New(config))
+
+	router.GET("/retrieveList", handleRetrieveList(redisClient, pgdb, chdb))
+	router.POST("/trackOpenRepository", handleTrackOpenRepository(pgdb))
 
 	return router
 }
 
-func handleRetrieveList(redisClient *redis.Client, db *database.PostgresConnection) gin.HandlerFunc {
+func handleRetrieveList(redisClient *redis.Client, pgdb *database.PostgresConnection, chdb *database.ClickHouseConnection) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		sessionID := c.Query("sessionId")
 		if sessionID == "" {
@@ -43,11 +52,11 @@ func handleRetrieveList(redisClient *redis.Client, db *database.PostgresConnecti
 		var recommendedRepoIDs []int64
 
 		// 1. Query the repository_views table for user history
-		userHistoryRepoIDs, err := db.GetRecentClickedRepositoryIDs(sessionID, 15) // Get last 15 clicked repos
+		userHistoryRepoIDs, err := pgdb.GetRecentClickedRepositoryIDs(sessionID, 15) // Get last 15 clicked repos
 		if err != nil {
 			log.Printf("Failed to get user history from Postgres: %v", err)
 			// Fallback to generic trending if history fails
-			repoIDs, err := db.GetTrendingRepositoryIDs(languages, tags)
+			repoIDs, err := pgdb.GetTrendingRepositoryIDs(languages, tags)
 			if err != nil {
 				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve repository list"})
 				return
@@ -55,7 +64,7 @@ func handleRetrieveList(redisClient *redis.Client, db *database.PostgresConnecti
 			recommendedRepoIDs = repoIDs
 		} else if len(userHistoryRepoIDs) == 0 {
 			// 2. If no user history exists, fall back to generic trending
-			repoIDs, err := db.GetTrendingRepositoryIDs(languages, tags)
+			repoIDs, err := pgdb.GetTrendingRepositoryIDs(languages, tags)
 			if err != nil {
 				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve repository list"})
 				return
@@ -143,14 +152,31 @@ func handleRetrieveList(redisClient *redis.Client, db *database.PostgresConnecti
 			redisClient.SAdd(context.Background(), sessionID, repoIDStrs)
 		}
 
+		// Fetch full repository data
+		repositories, err := pgdb.GetRepositoriesByIDs(finalRepoIDs)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve full repository data"})
+			return
+		}
+
+		// Add last_updated_at from ClickHouse
+		for i, repo := range repositories {
+			lastUpdate, err := chdb.GetLastUpdateForRepository(int64(repo.ID))
+			if err != nil {
+				log.Printf("Failed to get last update for repository %d from ClickHouse: %v", repo.ID, err)
+				// Continue without last_updated_at if there's an error
+			}
+			repositories[i].LastUpdatedAt = lastUpdate
+		}
+
 		c.JSON(http.StatusOK, gin.H{
 			"sessionId":    sessionID,
-			"repositories": finalRepoIDs,
+			"repositories": repositories,
 		})
 	}
 }
 
-func handleTrackOpenRepository(db *database.PostgresConnection) gin.HandlerFunc {
+func handleTrackOpenRepository(pgdb *database.PostgresConnection) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var requestBody struct {
 			SessionID    string `json:"sessionId"`
@@ -162,7 +188,7 @@ func handleTrackOpenRepository(db *database.PostgresConnection) gin.HandlerFunc 
 			return
 		}
 
-		if err := db.TrackRepositoryView(requestBody.SessionID, requestBody.RepositoryID); err != nil {
+		if err := pgdb.TrackRepositoryView(requestBody.SessionID, requestBody.RepositoryID); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to track repository view"})
 			return
 		}

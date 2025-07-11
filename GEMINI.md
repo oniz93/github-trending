@@ -676,3 +676,5 @@ This setup gives you a complete, professional foundation. You can now focus on w
 *   **Updated Configuration Handling:** The configuration loading logic now correctly parses custom duration units for "months" and "years".
 *   **Updated Data Models:** The data models have been updated to include more fields and new message structs have been added.
 *   **Improved GitHub Client:** The GitHub client now includes a backoff mechanism to handle rate limiting.
+*   **Fixed `similarity-engine-service`:** The `similarity-engine-service` now correctly retrieves embeddings from Qdrant, resolving a critical bug that prevented it from functioning.
+*   **Improved `embedding-service`:** The `embedding-service` now correctly handles cases where a README cannot be fetched, preventing poison-pill messages from clogging the queue.

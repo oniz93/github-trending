@@ -79,6 +79,35 @@ func (c *QdrantConnection) Search(ctx context.Context, collectionName string, ve
 		CollectionName: collectionName,
 		Vector:         vector,
 		Limit:          limit,
+		WithVectors: &qdrant_go_client.WithVectorsSelector{
+			SelectorOptions: &qdrant_go_client.WithVectorsSelector_Enable{
+				Enable: true,
+			},
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+	return res.GetResult(), nil
+}
+
+func (c *QdrantConnection) GetVectors(ctx context.Context, collectionName string, ids []uint64) ([]*qdrant_go_client.RetrievedPoint, error) {
+	var pointIds []*qdrant_go_client.PointId
+	for _, id := range ids {
+		pointIds = append(pointIds, &qdrant_go_client.PointId{
+			PointIdOptions: &qdrant_go_client.PointId_Num{Num: id},
+		})
+	}
+
+	withVectors := true
+	res, err := c.pointsClient.Get(ctx, &qdrant_go_client.GetPoints{
+		CollectionName: collectionName,
+		Ids:            pointIds,
+		WithVectors: &qdrant_go_client.WithVectorsSelector{
+			SelectorOptions: &qdrant_go_client.WithVectorsSelector_Enable{
+				Enable: withVectors,
+			},
+		},
 	})
 	if err != nil {
 		return nil, err

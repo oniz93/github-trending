@@ -24,7 +24,12 @@ func main() {
 		log.Fatalf("Failed to connect to Postgres: %v", err)
 	}
 
-	server := api.NewServer(redisClient, postgresConnection)
+	clickhouseConnection, err := database.NewClickHouseConnection(cfg.ClickhouseHost, cfg.ClickhousePort, cfg.ClickhouseUser, cfg.ClickhousePassword, cfg.ClickhouseDB)
+	if err != nil {
+		log.Fatalf("Failed to connect to ClickHouse: %v", err)
+	}
+
+	server := api.NewServer(redisClient, postgresConnection, clickhouseConnection)
 
 	log.Println("API Server started. Listening on :8080")
 	log.Fatal(server.Run(":8080"))

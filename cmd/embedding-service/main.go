@@ -108,14 +108,14 @@ func worker(id int, wg *sync.WaitGroup, jobs <-chan amqp.Delivery, pgConnection 
 				resp, httpErr := http.Get(repo.ReadmeURL.String)
 				if httpErr != nil || resp.StatusCode != http.StatusOK {
 					log.Printf("Worker %d: Failed to download README from URL %s: %v", id, repo.ReadmeURL.String, httpErr)
-					d.Nack(false, true)
+					d.Ack(false)
 					continue
 				}
 				defer resp.Body.Close()
 				readmeContent, err = io.ReadAll(resp.Body)
 				if err != nil {
 					log.Printf("Worker %d: Failed to read downloaded README content: %v", id, err)
-					d.Nack(false, true)
+					d.Ack(false)
 					continue
 				}
 			} else {

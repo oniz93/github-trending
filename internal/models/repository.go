@@ -68,6 +68,7 @@ type Repository struct {
 	Tags              []string  `json:"tags"`
 	Languages         map[string]int `json:"languages"`
 	LastCrawledAt     time.Time `json:"last_crawled_at"`
+	LastUpdatedAt     time.Time `json:"last_updated_at"`
 }
 
 type Owner struct {
