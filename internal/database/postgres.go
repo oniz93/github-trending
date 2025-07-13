@@ -50,20 +50,25 @@ func (pc *PostgresConnection) TrackRepositoryView(sessionID string, repositoryID
 	return err
 }
 
-// GetTrendingRepositoryIDs retrieves a list of trending repository IDs, filtered by languages and tags.
-func (pc *PostgresConnection) GetTrendingRepositoryIDs(languages []string, tags []string) ([]int64, error) {
+// GetTrendingRepositoryIDs retrieves a list of trending repository IDs, filtered by languages, tags and seen repositories.
+func (pc *PostgresConnection) GetTrendingRepositoryIDs(languages, tags, seenRepoIDs []string) ([]int64, error) {
 	query := "SELECT id FROM repositories"
 	args := []interface{}{}
 	whereClauses := []string{}
 
 	if len(languages) > 0 {
-		whereClauses = append(whereClauses, "id IN (SELECT repository_id FROM repository_languages WHERE language_id IN (SELECT id FROM languages WHERE name = ANY($1)))")
+		whereClauses = append(whereClauses, fmt.Sprintf("id IN (SELECT repository_id FROM repository_languages WHERE language_id IN (SELECT id FROM languages WHERE name = ANY($%d)))", len(args)+1))
 		args = append(args, languages)
 	}
 
 	if len(tags) > 0 {
-		whereClauses = append(whereClauses, "id IN (SELECT repository_id FROM repository_tags WHERE tag_id IN (SELECT id FROM tags WHERE name = ANY($2)))")
+		whereClauses = append(whereClauses, fmt.Sprintf("id IN (SELECT repository_id FROM repository_tags WHERE tag_id IN (SELECT id FROM tags WHERE name = ANY($%d)))", len(args)+1))
 		args = append(args, tags)
+	}
+
+	if len(seenRepoIDs) > 0 {
+		whereClauses = append(whereClauses, fmt.Sprintf("id NOT IN ($%d)", len(args)+1))
+		args = append(args, seenRepoIDs)
 	}
 
 	if len(whereClauses) > 0 {

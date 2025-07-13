@@ -25,7 +25,7 @@ func NewServer(redisClient *redis.Client, pgdb *database.PostgresConnection, chd
 	router.Use(cors.New(config))
 
 	router.GET("/retrieveList", handleRetrieveList(redisClient, pgdb, chdb))
-	router.POST("/trackOpenRepository", handleTrackOpenRepository(pgdb))
+	router.POST("/trackOpenRepository", handleTrackOpenRepository(redisClient, pgdb))
 
 	return router
 }
@@ -53,7 +53,7 @@ func handleRetrieveList(redisClient *redis.Client, pgdb *database.PostgresConnec
 		if err != nil {
 			log.Printf("Failed to get user history from Postgres: %v", err)
 			// Fallback to generic trending if history fails
-			repoIDs, err := pgdb.GetTrendingRepositoryIDs(languages, tags)
+			repoIDs, err := pgdb.GetTrendingRepositoryIDs(languages, tags, []string{})
 			if err != nil {
 				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve repository list"})
 				return
@@ -61,7 +61,8 @@ func handleRetrieveList(redisClient *redis.Client, pgdb *database.PostgresConnec
 			recommendedRepoIDs = repoIDs
 		} else if len(userHistoryRepoIDs) == 0 {
 			// 2. If no user history exists, fall back to generic trending
-			repoIDs, err := pgdb.GetTrendingRepositoryIDs(languages, tags)
+			seenRepoIDs, _ := redisClient.SMembers(context.Background(), sessionID).Result()
+			repoIDs, err := pgdb.GetTrendingRepositoryIDs(languages, tags, seenRepoIDs)
 			if err != nil {
 				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve repository list"})
 				return
@@ -140,15 +141,6 @@ func handleRetrieveList(redisClient *redis.Client, pgdb *database.PostgresConnec
 			finalRepoIDs = finalRepoIDs[start:end]
 		}
 
-		// Add the new repositories to the seen set in Redis
-		if len(finalRepoIDs) > 0 {
-			var repoIDStrs []string
-			for _, id := range finalRepoIDs {
-				repoIDStrs = append(repoIDStrs, fmt.Sprint(id))
-			}
-			redisClient.SAdd(context.Background(), sessionID, repoIDStrs)
-		}
-
 		// Fetch full repository data
 		repositories, err := pgdb.GetRepositoriesDataByIDs(finalRepoIDs)
 		if err != nil {
@@ -172,7 +164,7 @@ func handleRetrieveList(redisClient *redis.Client, pgdb *database.PostgresConnec
 	}
 }
 
-func handleTrackOpenRepository(pgdb *database.PostgresConnection) gin.HandlerFunc {
+func handleTrackOpenRepository(redisClient *redis.Client, pgdb *database.PostgresConnection) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var requestBody struct {
 			SessionID    string `json:"sessionId"`
@@ -188,6 +180,9 @@ func handleTrackOpenRepository(pgdb *database.PostgresConnection) gin.HandlerFun
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to track repository view"})
 			return
 		}
+
+		// Add the repository to the seen set in Redis
+		redisClient.SAdd(context.Background(), requestBody.SessionID, fmt.Sprint(requestBody.RepositoryID))
 
 		c.JSON(http.StatusOK, gin.H{"status": "success"})
 	}
