@@ -455,3 +455,92 @@ func (pc *PostgresConnection) GetRepositoriesByIDs(repoIDs []int64) ([]models.Re
 
 	return repositories, nil
 }
+
+func (pc *PostgresConnection) GetRepositoriesDataByIDs(repoIDs []int64) ([]models.RepositoryData, error) {
+	if len(repoIDs) == 0 {
+		return []models.RepositoryData{}, nil
+	}
+
+	// Create a string of placeholders for the IN clause
+	placeholders := make([]string, len(repoIDs))
+	args := make([]interface{}, len(repoIDs))
+	for i, id := range repoIDs {
+		placeholders[i] = fmt.Sprintf("$%d", i+1)
+		args[i] = id
+	}
+	placeholderStr := strings.Join(placeholders, ",")
+
+	query := fmt.Sprintf(`
+		SELECT
+			r.id, r.node_id, r.name, r.full_name, r.description, r.html_url, r.homepage, r.default_branch, r.license_key, r.readme_url, r.created_at, r.is_fork, r.is_template, r.is_archived, r.is_disabled, r.last_crawled_at,
+			o.id, o.login, o.node_id, o.avatar_url, o.html_url, o.type,
+			l.name, l.spdx_id, l.url, l.node_id
+		FROM
+			repositories r
+		JOIN
+			owners o ON r.owner_id = o.id
+		LEFT JOIN
+			licenses l ON r.license_key = l.key
+		WHERE
+			r.id IN (%s)
+	`, placeholderStr)
+
+	rows, err := pc.DB.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query repositories by IDs: %w", err)
+	}
+	defer rows.Close()
+
+	var repositoriesData []models.RepositoryData
+	for rows.Next() {
+		var repoData models.RepositoryData
+		var ownerID int
+		var licenseKey sql.NullString
+		var repoNodeID sql.NullString
+		var ownerNodeID sql.NullString
+		var licenseName sql.NullString
+
+		err := rows.Scan(
+			&repoData.Repository.ID, &repoNodeID, &repoData.Repository.Name, &repoData.Repository.FullName, &repoData.Repository.Description, &repoData.Repository.HTMLURL, &repoData.Repository.Homepage, &repoData.Repository.DefaultBranch, &licenseKey, &repoData.Repository.ReadmeURL, &repoData.Repository.CreatedAt, &repoData.Repository.Fork, &repoData.Repository.IsTemplate, &repoData.Repository.Archived, &repoData.Repository.Disabled, &repoData.Repository.LastCrawledAt,
+			&ownerID, &repoData.Owner.Login, &ownerNodeID, &repoData.Owner.AvatarURL, &repoData.Owner.HTMLURL, &repoData.Owner.Type,
+			&licenseName, &repoData.Repository.License.SpdxID, &repoData.Repository.License.URL, &repoData.Repository.License.NodeID,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan repository row: %w", err)
+		}
+
+		if repoNodeID.Valid {
+			repoData.Repository.NodeID = repoNodeID
+		}
+
+		if ownerNodeID.Valid {
+			repoData.Owner.NodeID = ownerNodeID
+		}
+
+		if licenseKey.Valid {
+			repoData.Repository.License.Key = licenseKey
+		}
+
+		if licenseName.Valid {
+			repoData.Repository.License.Name = licenseName
+		}
+
+		// Fetch tags
+		tags, err := pc.getTagsForRepository(int64(repoData.Repository.ID))
+		if err != nil {
+			return nil, fmt.Errorf("failed to get tags for repository %d: %w", repoData.Repository.ID, err)
+		}
+		repoData.Tags = tags
+
+		// Fetch languages
+		languages, err := pc.getLanguagesForRepository(int64(repoData.Repository.ID))
+		if err != nil {
+			return nil, fmt.Errorf("failed to get languages for repository %d: %w", repoData.Repository.ID, err)
+		}
+		repoData.Repository.Languages = languages
+
+		repositoriesData = append(repositoriesData, repoData)
+	}
+
+	return repositoriesData, nil
+}

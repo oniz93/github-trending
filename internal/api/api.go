@@ -15,10 +15,6 @@ import (
 	"github.com/teomiscia/github-trending/internal/database"
 )
 
-import (
-	"github.com/gin-contrib/cors"
-)
-
 func NewServer(redisClient *redis.Client, pgdb *database.PostgresConnection, chdb *database.ClickHouseConnection) *gin.Engine {
 	router := gin.Default()
 
@@ -153,20 +149,19 @@ func handleRetrieveList(redisClient *redis.Client, pgdb *database.PostgresConnec
 		}
 
 		// Fetch full repository data
-		repositories, err := pgdb.GetRepositoriesByIDs(finalRepoIDs)
+		repositories, err := pgdb.GetRepositoriesDataByIDs(finalRepoIDs)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve full repository data"})
 			return
 		}
 
-		// Add last_updated_at from ClickHouse
+		// Add stats from ClickHouse
 		for i, repo := range repositories {
-			lastUpdate, err := chdb.GetLastUpdateForRepository(int64(repo.ID))
+			stats, err := chdb.GetRepositoryStats(int64(repo.Repository.ID))
 			if err != nil {
-				log.Printf("Failed to get last update for repository %d from ClickHouse: %v", repo.ID, err)
-				// Continue without last_updated_at if there's an error
+				log.Printf("Failed to get stats for repository %d from ClickHouse: %v", repo.Repository.ID, err)
 			}
-			repositories[i].LastUpdatedAt = lastUpdate
+			repositories[i].Stats = stats
 		}
 
 		c.JSON(http.StatusOK, gin.H{

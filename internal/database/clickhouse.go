@@ -85,3 +85,23 @@ func (ch *ClickHouseConnection) GetLastUpdateForRepository(repoID int64) (time.T
 	}
 	return lastUpdate, nil
 }
+
+// GetRepositoryStats retrieves all statistics for a given repository from ClickHouse.
+func (ch *ClickHouseConnection) GetRepositoryStats(repoID int64) ([]models.RepositoryStat, error) {
+	rows, err := ch.DB.Query("SELECT event_date, event_time, stargazers_count, watchers_count, forks_count, open_issues_count, pushed_at, score FROM repository_stats WHERE repository_id = ? ORDER BY event_time DESC", repoID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var stats []models.RepositoryStat
+	for rows.Next() {
+		var stat models.RepositoryStat
+		if err := rows.Scan(&stat.EventDate, &stat.EventTime, &stat.StargazersCount, &stat.WatchersCount, &stat.ForksCount, &stat.OpenIssuesCount, &stat.PushedAt, &stat.Score); err != nil {
+			return nil, err
+		}
+		stats = append(stats, stat)
+	}
+
+	return stats, nil
+}
