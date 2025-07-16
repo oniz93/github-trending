@@ -1,51 +1,78 @@
+// web/lib/src/providers/repository_provider.dart
 import 'package:flutter/material.dart';
-import 'package:github_trending_app/models/repository.dart';
-import 'package:github_trending_app/services/api_service.dart';
-import 'package:uuid/uuid.dart';
+import 'package:github_trending_app/src/models/repository.dart';
+import 'package:github_trending_app/src/services/api_service.dart';
 
 class RepositoryProvider with ChangeNotifier {
-  final ApiService _apiService = ApiService();
-
+  final ApiService _apiService;
   List<Repository> _repositories = [];
-  List<Repository> get repositories => _repositories;
-
   bool _isLoading = false;
+  String? _errorMessage;
+  String? _sessionId;
+  int _currentPage = 0;
+
+  List<Repository> get repositories => _repositories;
   bool get isLoading => _isLoading;
+  String? get errorMessage => _errorMessage;
+  String? get sessionId => _sessionId;
 
-  int _page = 0;
-  String _sessionId = Uuid().v4();
+  RepositoryProvider({ApiService? apiService}) : _apiService = apiService ?? ApiService();
 
-  Future<void> fetchRepositories({List<String> languages = const [], List<String> tags = const []}) async {
+  Future<void> fetchRepositories({
+    List<String>? languages,
+    List<String>? tags,
+    bool refresh = false,
+  }) async {
+    if (_isLoading) return;
+
     _isLoading = true;
+    _errorMessage = null;
+    if (refresh) {
+      _currentPage = 0;
+      _repositories = [];
+    }
     notifyListeners();
 
-    final newRepositories = await _apiService.retrieveList(
-      _sessionId,
-      languages,
-      tags,
-      _page,
-    );
+    try {
+      final responseData = await _apiService.fetchRepositories(
+        sessionId: _sessionId,
+        languages: languages,
+        tags: tags,
+        page: _currentPage,
+      );
 
-    _repositories.addAll(newRepositories);
-    _page++;
-    _isLoading = false;
-    notifyListeners();
+      final List<dynamic> repositoriesJson = responseData['repositories'];
+      final String? newSessionId = responseData['sessionId'];
+
+      if (newSessionId != null && _sessionId == null) {
+        _sessionId = newSessionId;
+      }
+
+      _repositories.addAll(repositoriesJson.map((json) => Repository.fromJson(json)).toList());
+      _currentPage++;
+    } catch (e) {
+      _errorMessage = 'Failed to load repositories: ${e.toString()}';
+      print(_errorMessage); // Log the error for debugging
+    } finally {
+      _isLoading = false;
+      notifyListeners();
+    }
   }
 
   Future<void> trackOpenRepository(int repositoryId) async {
-    await _apiService.trackOpenRepository(_sessionId, repositoryId);
+    if (_sessionId == null) {
+      print("Warning: No session ID available to track repository open event.");
+      return;
+    }
+    try {
+      await _apiService.trackOpenRepository(_sessionId!, repositoryId);
+    } catch (e) {
+      print('Error tracking repository open event: ${e.toString()}');
+    }
   }
 
-  Future<void> fetchReadmeForRepository(Repository repository) async {
-    final readme = await _apiService.fetchReadme(
-      repository.owner.login,
-      repository.name,
-      repository.defaultBranch,
-    );
-    final index = _repositories.indexWhere((repo) => repo.id == repository.id);
-    if (index != -1) {
-      _repositories[index] = _repositories[index].copyWith(readmeSnippet: readme);
-      notifyListeners();
-    }
+  void setSessionId(String id) {
+    _sessionId = id;
+    notifyListeners();
   }
 }
