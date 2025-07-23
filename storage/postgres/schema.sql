@@ -57,9 +57,25 @@ CREATE TABLE IF NOT EXISTS repository_tags (
     PRIMARY KEY (repository_id, tag_id)
 );
 
+CREATE TABLE IF NOT EXISTS topics (
+    id SERIAL PRIMARY KEY,
+    name VARCHAR(255) UNIQUE NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS repository_topics (
+    repository_id BIGINT REFERENCES repositories(id) ON DELETE CASCADE,
+    topic_id INT REFERENCES topics(id) ON DELETE CASCADE,
+    PRIMARY KEY (repository_id, topic_id)
+);
+
 CREATE TABLE IF NOT EXISTS repository_views (
     id SERIAL PRIMARY KEY,
     session_id VARCHAR(255) NOT NULL,
     repository_id BIGINT NOT NULL,
     viewed_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS repository_similarity (
+    id BIGINT PRIMARY KEY,
+    data JSONB NOT NULL
 );

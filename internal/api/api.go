@@ -2,12 +2,14 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
@@ -46,6 +48,11 @@ func handleRetrieveList(redisClient *redis.Client, pgdb *database.PostgresConnec
 			tags = []string{}
 		}
 
+		topics := strings.Split(c.Query("topics"), ",")
+		if len(topics) == 1 && topics[0] == "" {
+			topics = []string{}
+		}
+
 		var recommendedRepoIDs []int64
 
 		// 1. Query the repository_views table for user history
@@ -53,7 +60,7 @@ func handleRetrieveList(redisClient *redis.Client, pgdb *database.PostgresConnec
 		if err != nil {
 			log.Printf("Failed to get user history from Postgres: %v", err)
 			// Fallback to generic trending if history fails
-			repoIDs, err := pgdb.GetTrendingRepositoryIDs(languages, tags, []string{})
+			repoIDs, err := pgdb.GetTrendingRepositoryIDs(languages, tags, topics, []string{})
 			if err != nil {
 				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve repository list"})
 				return
@@ -62,7 +69,7 @@ func handleRetrieveList(redisClient *redis.Client, pgdb *database.PostgresConnec
 		} else if len(userHistoryRepoIDs) == 0 {
 			// 2. If no user history exists, fall back to generic trending
 			seenRepoIDs, _ := redisClient.SMembers(context.Background(), sessionID).Result()
-			repoIDs, err := pgdb.GetTrendingRepositoryIDs(languages, tags, seenRepoIDs)
+			repoIDs, err := pgdb.GetTrendingRepositoryIDs(languages, tags, topics, seenRepoIDs)
 			if err != nil {
 				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve repository list"})
 				return
@@ -73,12 +80,35 @@ func handleRetrieveList(redisClient *redis.Client, pgdb *database.PostgresConnec
 			candidateScores := make(map[int64]float64)
 			for _, historyRepoID := range userHistoryRepoIDs {
 				redisKey := fmt.Sprintf("similar:%d", historyRepoID)
-				// Fetch top 50 similar repos for each history item
+
+				// Try to get from Redis first
 				similarRepos, err := redisClient.ZRevRangeWithScores(context.Background(), redisKey, 0, 49).Result()
-				if err != nil {
-					log.Printf("Failed to get similar repos from Redis for %d: %v", historyRepoID, err)
-					continue
+				if err != nil || len(similarRepos) == 0 {
+					// If not in Redis, get from PostgreSQL
+					jsonData, err := pgdb.GetRepositorySimilarity(historyRepoID)
+					if err != nil {
+						log.Printf("Failed to get similar repos from Postgres for %d: %v", historyRepoID, err)
+						continue
+					}
+
+					if jsonData != nil {
+						var zMembers []redis.Z
+						if err := json.Unmarshal(jsonData, &zMembers); err != nil {
+							log.Printf("Failed to unmarshal similarity data for repo %d: %v", historyRepoID, err)
+							continue
+						}
+
+						// Add to Redis with a 24-hour TTL
+						_, err = redisClient.ZAdd(context.Background(), redisKey, zMembers...).Result()
+						if err != nil {
+							log.Printf("Failed to store similarity list for repo %d in Redis: %v", historyRepoID, err)
+						}
+						redisClient.Expire(context.Background(), redisKey, 24*time.Hour)
+
+						similarRepos, _ = redisClient.ZRevRangeWithScores(context.Background(), redisKey, 0, 49).Result()
+					}
 				}
+
 				for _, z := range similarRepos {
 					repoID, _ := strconv.ParseInt(fmt.Sprintf("%.0f", z.Member), 10, 64)
 					candidateScores[repoID] += z.Score

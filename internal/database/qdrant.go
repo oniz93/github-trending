@@ -74,11 +74,27 @@ func (c *QdrantConnection) UpsertVectors(ctx context.Context, collectionName str
 	return err
 }
 
-func (c *QdrantConnection) Search(ctx context.Context, collectionName string, vector []float32, limit uint64) ([]*qdrant_go_client.ScoredPoint, error) {
+func (c *QdrantConnection) Search(ctx context.Context, collectionName string, vector []float32, limit uint64, excludeID uint64) ([]*qdrant_go_client.ScoredPoint, error) {
 	res, err := c.pointsClient.Search(ctx, &qdrant_go_client.SearchPoints{
 		CollectionName: collectionName,
 		Vector:         vector,
 		Limit:          limit,
+		Filter: &qdrant_go_client.Filter{
+			MustNot: []*qdrant_go_client.Condition{
+				{
+					ConditionOneOf: &qdrant_go_client.Condition_Field{
+						Field: &qdrant_go_client.FieldCondition{
+							Key: "id",
+							Match: &qdrant_go_client.Match{
+								MatchValue: &qdrant_go_client.Match_Integer{
+									Integer: int64(excludeID),
+								},
+							},
+						},
+					},
+				},
+			},
+		},
 		WithVectors: &qdrant_go_client.WithVectorsSelector{
 			SelectorOptions: &qdrant_go_client.WithVectorsSelector_Enable{
 				Enable: true,

@@ -51,7 +51,7 @@ func (pc *PostgresConnection) TrackRepositoryView(sessionID string, repositoryID
 }
 
 // GetTrendingRepositoryIDs retrieves a list of trending repository IDs, filtered by languages, tags and seen repositories.
-func (pc *PostgresConnection) GetTrendingRepositoryIDs(languages, tags, seenRepoIDs []string) ([]int64, error) {
+func (pc *PostgresConnection) GetTrendingRepositoryIDs(languages, tags, topics, seenRepoIDs []string) ([]int64, error) {
 	query := "SELECT id FROM repositories"
 	args := []interface{}{}
 	whereClauses := []string{}
@@ -64,6 +64,11 @@ func (pc *PostgresConnection) GetTrendingRepositoryIDs(languages, tags, seenRepo
 	if len(tags) > 0 {
 		whereClauses = append(whereClauses, fmt.Sprintf("id IN (SELECT repository_id FROM repository_tags WHERE tag_id IN (SELECT id FROM tags WHERE name = ANY($%d)))", len(args)+1))
 		args = append(args, tags)
+	}
+
+	if len(topics) > 0 {
+		whereClauses = append(whereClauses, fmt.Sprintf("id IN (SELECT repository_id FROM repository_topics WHERE topic_id IN (SELECT id FROM topics WHERE name = ANY($%d)))", len(args)+1))
+		args = append(args, topics)
 	}
 
 	if len(seenRepoIDs) > 0 {
@@ -178,6 +183,24 @@ func (pc *PostgresConnection) InsertRepository(repo models.Repository, lastCrawl
 		}
 	}
 
+	// Insert topics
+	for _, topicName := range repo.Topics {
+		var topicID int
+		err = tx.QueryRow("INSERT INTO topics (name) VALUES ($1) ON CONFLICT (name) DO UPDATE SET name = $1 RETURNING id", topicName).Scan(&topicID)
+		if err != nil {
+			log.Printf("Failed to insert topic: %v", err)
+			tx.Rollback()
+			return err
+		}
+
+		_, err = tx.Exec("INSERT INTO repository_topics (repository_id, topic_id) VALUES ($1, $2) ON CONFLICT DO NOTHING", repo.ID, topicID)
+		if err != nil {
+			log.Printf("Failed to insert repository_topic: %v", err)
+			tx.Rollback()
+			return err
+		}
+	}
+
 	// Insert languages
 	for langName, size := range repo.Languages {
 		var langID int
@@ -261,6 +284,13 @@ func (pc *PostgresConnection) GetRepositoryByID(repoID int64) (models.Repository
 	}
 	repo.Tags = tags
 
+	// Fetch topics
+	topics, err := pc.getTopicsForRepository(repoID)
+	if err != nil {
+		return models.Repository{}, fmt.Errorf("failed to get topics for repository: %w", err)
+	}
+	repo.Topics = topics
+
 	// Fetch languages
 	languages, err := pc.getLanguagesForRepository(repoID)
 	if err != nil {
@@ -296,6 +326,33 @@ func (pc *PostgresConnection) getTagsForRepository(repoID int64) ([]string, erro
 		tags = append(tags, tag)
 	}
 	return tags, nil
+}
+
+func (pc *PostgresConnection) getTopicsForRepository(repoID int64) ([]string, error) {
+	rows, err := pc.DB.Query(`
+		SELECT
+			t.name
+		FROM
+			topics t
+		JOIN
+			repository_topics rt ON t.id = rt.topic_id
+		WHERE
+			rt.repository_id = $1
+	`, repoID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var topics []string
+	for rows.Next() {
+		var topic string
+		if err := rows.Scan(&topic); err != nil {
+			return nil, err
+		}
+		topics = append(topics, topic)
+	}
+	return topics, nil
 }
 
 func (pc *PostgresConnection) getLanguagesForRepository(repoID int64) (map[string]int, error) {
@@ -366,100 +423,52 @@ func (pc *PostgresConnection) GetRecentClickedRepositoryIDs(sessionID string, li
 	return ids, nil
 }
 
-// GetRepositoriesByIDs retrieves a list of repositories by their IDs.
-func (pc *PostgresConnection) GetRepositoriesByIDs(repoIDs []int64) ([]models.Repository, error) {
-	if len(repoIDs) == 0 {
-		return []models.Repository{}, nil
-	}
-
-	// Create a string of placeholders for the IN clause
-	placeholders := make([]string, len(repoIDs))
-	args := make([]interface{}, len(repoIDs))
-	for i, id := range repoIDs {
-		placeholders[i] = fmt.Sprintf("$%d", i+1)
-		args[i] = id
-	}
-	placeholderStr := strings.Join(placeholders, ",")
-
-	query := fmt.Sprintf(`
-		SELECT
-			r.id, r.node_id, r.name, r.full_name, r.owner_id, r.description, r.html_url, r.homepage, r.default_branch, r.license_key, r.readme_url, r.created_at, r.is_fork, r.is_template, r.is_archived, r.is_disabled, r.last_crawled_at,
-			o.login, o.node_id, o.avatar_url, o.html_url, o.type, o.site_admin,
-			l.name, l.spdx_id, l.url, l.node_id
-		FROM
-			repositories r
-		JOIN
-			owners o ON r.owner_id = o.id
-		LEFT JOIN
-			licenses l ON r.license_key = l.key
-		WHERE
-			r.id IN (%s)
-	`, placeholderStr)
-
-	rows, err := pc.DB.Query(query, args...)
+// GetRepositoryIDs retrieves a slice of repository IDs from the database.
+func (pc *PostgresConnection) GetRepositoryIDs(limit, offset int) ([]int64, error) {
+	rows, err := pc.DB.Query("SELECT id FROM repositories ORDER BY id LIMIT $1 OFFSET $2", limit, offset)
 	if err != nil {
-		return nil, fmt.Errorf("failed to query repositories by IDs: %w", err)
+		return nil, err
 	}
 	defer rows.Close()
 
-	var repositories []models.Repository
+	var ids []int64
 	for rows.Next() {
-		var repo models.Repository
-		var ownerID int
-		var licenseKey sql.NullString
-		var repoNodeID sql.NullString
-		var ownerNodeID sql.NullString
-		var siteAdmin sql.NullBool
-		var licenseName sql.NullString
-
-		err := rows.Scan(
-			&repo.ID, &repoNodeID, &repo.Name, &repo.FullName, &ownerID, &repo.Description, &repo.HTMLURL, &repo.Homepage, &repo.DefaultBranch, &licenseKey, &repo.ReadmeURL, &repo.CreatedAt, &repo.Fork, &repo.IsTemplate, &repo.Archived, &repo.Disabled, &repo.LastCrawledAt,
-			&repo.Owner.Login, &ownerNodeID, &repo.Owner.AvatarURL, &repo.Owner.HTMLURL, &repo.Owner.Type, &siteAdmin,
-			&licenseName, &repo.License.SpdxID, &repo.License.URL, &repo.License.NodeID,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("failed to scan repository row: %w", err)
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
 		}
-
-		if repoNodeID.Valid {
-			repo.NodeID = repoNodeID
-		}
-
-		if ownerNodeID.Valid {
-			repo.Owner.NodeID = ownerNodeID
-		}
-
-		if licenseKey.Valid {
-			repo.License.Key = licenseKey
-		}
-
-		if licenseName.Valid {
-			repo.License.Name = licenseName
-		}
-
-		if siteAdmin.Valid {
-			repo.Owner.SiteAdmin = siteAdmin
-		}
-
-		// Fetch tags
-		tags, err := pc.getTagsForRepository(int64(repo.ID))
-		if err != nil {
-			return nil, fmt.Errorf("failed to get tags for repository %d: %w", repo.ID, err)
-		}
-		repo.Tags = tags
-
-		// Fetch languages
-		languages, err := pc.getLanguagesForRepository(int64(repo.ID))
-		if err != nil {
-			return nil, fmt.Errorf("failed to get languages for repository %d: %w", repo.ID, err)
-		}
-		repo.Languages = languages
-
-		repositories = append(repositories, repo)
+		ids = append(ids, id)
 	}
 
-	return repositories, nil
+	return ids, nil
 }
+
+// UpsertRepositorySimilarity inserts or updates the similarity data for a repository.
+func (pc *PostgresConnection) UpsertRepositorySimilarity(repoID int64, data []byte) error {
+	query := `
+		INSERT INTO repository_similarity (id, data)
+		VALUES ($1, $2)
+		ON CONFLICT (id) DO UPDATE SET
+		data = $2
+	`
+	_, err := pc.DB.Exec(query, repoID, data)
+	return err
+}
+
+// GetRepositorySimilarity retrieves the similarity data for a repository.
+func (pc *PostgresConnection) GetRepositorySimilarity(repoID int64) ([]byte, error) {
+	var data []byte
+	query := "SELECT data FROM repository_similarity WHERE id = $1"
+	err := pc.DB.QueryRow(query, repoID).Scan(&data)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil // No similarity data found
+		}
+		return nil, err
+	}
+	return data, nil
+}
+
 
 func (pc *PostgresConnection) GetRepositoriesDataByIDs(repoIDs []int64) ([]models.RepositoryData, error) {
 	if len(repoIDs) == 0 {
@@ -536,6 +545,13 @@ func (pc *PostgresConnection) GetRepositoriesDataByIDs(repoIDs []int64) ([]model
 			return nil, fmt.Errorf("failed to get tags for repository %d: %w", repoData.Repository.ID, err)
 		}
 		repoData.Tags = tags
+
+		// Fetch topics
+		topics, err := pc.getTopicsForRepository(int64(repoData.Repository.ID))
+		if err != nil {
+			return nil, fmt.Errorf("failed to get topics for repository %d: %w", repoData.Repository.ID, err)
+		}
+		repoData.Repository.Topics = topics
 
 		// Fetch languages
 		languages, err := pc.getLanguagesForRepository(int64(repoData.Repository.ID))

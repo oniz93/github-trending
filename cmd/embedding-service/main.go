@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	qdrant_go_client "github.com/qdrant/go-client/qdrant"
@@ -118,6 +119,14 @@ func worker(id int, wg *sync.WaitGroup, jobs <-chan amqp.Delivery, pgConnection 
 					d.Ack(false)
 					continue
 				}
+				// Save the downloaded README to MinIO
+				reader := bytes.NewReader(readmeContent)
+				_, err := minioConnection.UploadFile(context.Background(), embedMsg.MinioPath, reader, int64(len(readmeContent)), "text/markdown")
+				if err != nil {
+					log.Printf("Worker %d: Failed to upload downloaded README to MinIO for %s: %v", id, embedMsg.MinioPath, err)
+				} else {
+					log.Printf("Worker %d: Successfully cached README for %s in MinIO", id, embedMsg.MinioPath)
+				}
 			} else {
 				log.Printf("Worker %d: No README URL available for repo %d, skipping embedding.", id, embedMsg.RepositoryID)
 				d.Ack(false)
@@ -147,13 +156,36 @@ func worker(id int, wg *sync.WaitGroup, jobs <-chan amqp.Delivery, pgConnection 
 	}
 }
 
-// generateEmbedding is a placeholder function for generating embeddings.
-// In a real application, this would involve calling an ML model.
 func generateEmbedding(content []byte) []float32 {
-	// Dummy implementation: create a 384-dimensional vector with dummy values
-	embedding := make([]float32, 384)
-	for i := range embedding {
-		embedding[i] = float32(i) / 384.0 // Dummy values
+	// Prepare the request body
+	requestBody, err := json.Marshal(map[string]string{
+		"text": string(content),
+	})
+	if err != nil {
+		log.Printf("Failed to marshal request body: %v", err)
+		return nil
 	}
-	return embedding
+
+	// Make a POST request to the embedding API service
+	resp, err := http.Post("http://embedding-api-service/embed", "application/json", bytes.NewBuffer(requestBody))
+	if err != nil {
+		log.Printf("Failed to call embedding API: %v", err)
+		return nil
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		log.Printf("Embedding API returned non-OK status: %d, body: %s", resp.StatusCode, string(bodyBytes))
+		return nil
+	}
+
+	// Decode the response
+	var result map[string][]float32
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		log.Printf("Failed to decode embedding response: %v", err)
+		return nil
+	}
+
+	return result["embedding"]
 }

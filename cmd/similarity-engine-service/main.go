@@ -130,7 +130,7 @@ func processRepository(repoID int64, qdrantConnection *database.QdrantConnection
 	embedding := vectors[0].GetVectors().GetVector().GetData()
 
 	// 3. Perform a similarity search in Qdrant using that vector to find the top N nearest neighbors.
-	searchResults, err := qdrantConnection.Search(context.Background(), "repositories", embedding, uint64(cfg.SimilarityListSize))
+	searchResults, err := qdrantConnection.Search(context.Background(), "repositories", embedding, uint64(cfg.SimilarityListSize), uint64(repoID))
 	if err != nil {
 		log.Printf("Failed to search embeddings for repo %d in Qdrant: %v", repoID, err)
 		return
@@ -143,12 +143,34 @@ func processRepository(repoID int64, qdrantConnection *database.QdrantConnection
 		zMembers = append(zMembers, redis.Z{Score: float64(result.GetScore()), Member: result.GetId().GetNum()})
 	}
 
-	if len(zMembers) > 0 {
-		_, err = redisClient.ZAdd(context.Background(), redisKey, zMembers...).Result()
-		if err != nil {
-			log.Printf("Failed to store similarity list for repo %d in Redis: %v", repoID, err)
-			return
+	// 5. Store the similarity data in PostgreSQL.
+	jsonData, err := json.Marshal(zMembers)
+	if err != nil {
+		log.Printf("Failed to marshal similarity data for repo %d: %v", repoID, err)
+		return
+	}
+	err = pgConnection.UpsertRepositorySimilarity(repoID, jsonData)
+	if err != nil {
+		log.Printf("Failed to store similarity data for repo %d in PostgreSQL: %v", repoID, err)
+		return
+	}
+
+	// 6. If the key exists in Redis, update it without touching the TTL.
+	exists, err := redisClient.Exists(context.Background(), redisKey).Result()
+	if err != nil {
+		log.Printf("Failed to check if key exists in Redis for repo %d: %v", repoID, err)
+		return
+	}
+
+	if exists == 1 {
+		if len(zMembers) > 0 {
+			_, err = redisClient.ZAdd(context.Background(), redisKey, zMembers...).Result()
+			if err != nil {
+				log.Printf("Failed to store similarity list for repo %d in Redis: %v", repoID, err)
+				return
+			}
 		}
 	}
+
 	log.Printf("Successfully calculated and stored similarity for repo ID: %d", repoID)
 }

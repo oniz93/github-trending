@@ -177,6 +177,18 @@ services:
     env_file:
       - ./.env
 
+  embedding-api-service:
+    build:
+      context: ./cmd/embedding-api-service
+    deploy:
+      replicas: 3
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   similarity-engine-service:
     build:
       context: .
