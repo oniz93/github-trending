@@ -4,20 +4,25 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	qdrant_go_client "github.com/qdrant/go-client/qdrant"
-	"github.com/streadway/amqp"
 	"io"
 	"log"
 	"net/http"
+	"runtime"
 	"sync"
+	"time"
 
+	qdrant_go_client "github.com/qdrant/go-client/qdrant"
+	"github.com/streadway/amqp"
 	"github.com/teomiscia/github-trending/internal/config"
 	"github.com/teomiscia/github-trending/internal/database"
 	"github.com/teomiscia/github-trending/internal/messaging"
 	"github.com/teomiscia/github-trending/internal/models"
 )
 
-const numWorkers = 100
+const (
+	numWorkers = 20
+	queueName  = "readme_to_embed"
+)
 
 func main() {
 	cfg, err := config.Load()
@@ -49,115 +54,151 @@ func main() {
 	defer qdrantConnection.Close()
 
 	const vectorSize = 384
-	log.Printf("Ensuring Qdrant collection 'repositories' exists with vector size %d", vectorSize)
 	err = qdrantConnection.CreateCollection(context.Background(), "repositories", vectorSize)
 	if err != nil {
 		log.Fatalf("Failed to create or verify Qdrant collection: %v", err)
 	}
 
-	readmeEmbedQueueName := "readme_to_embed"
-
-	msgs, err := mqConnection.Consume(readmeEmbedQueueName)
-	if err != nil {
-		log.Fatalf("Failed to start consuming from queue %s: %v", readmeEmbedQueueName, err)
-	}
-
+	jobs := make(chan amqp.Delivery, numWorkers)
 	var wg sync.WaitGroup
-	jobs := make(chan amqp.Delivery, 100)
 
-	for i := 0; i < numWorkers; i++ {
+	for i := 1; i <= numWorkers; i++ {
 		wg.Add(1)
 		go worker(i, &wg, jobs, pgConnection, minioConnection, qdrantConnection)
 	}
 
-	log.Printf("Embedding service started. Waiting for messages on queue: %s", readmeEmbedQueueName)
+	log.Printf("Embedding service started. Waiting for messages on queue: %s", queueName)
 
-	for d := range msgs {
-		jobs <- d
+	// Main loop to consume messages and handle reconnects
+	for {
+		msgs, err := mqConnection.Consume(queueName)
+		if err != nil {
+			log.Printf("Failed to start consuming from queue %s: %v. Reconnecting...", queueName, err)
+			// Wait before trying to reconnect
+			time.Sleep(5 * time.Second)
+			mqConnection, err = messaging.NewConnection(cfg.RabbitMQURL)
+			if err != nil {
+				log.Printf("Failed to reconnect to RabbitMQ: %v", err)
+				continue // try again
+			}
+			continue
+		}
+
+		// This channel will be closed when the connection is lost
+		notifyClose := make(chan *amqp.Error)
+		mqConnection.Connection.NotifyClose(notifyClose)
+
+		log.Println("Successfully connected to RabbitMQ. Consuming messages.")
+
+		// Process messages until the connection is lost
+		for {
+			select {
+			case d, ok := <-msgs:
+				if !ok {
+					log.Println("Message channel closed. Reconnecting...")
+					goto Reconnect
+				}
+				jobs <- d
+			case err := <-notifyClose:
+				log.Printf("Connection to RabbitMQ lost: %v. Reconnecting...", err)
+				goto Reconnect
+			}
+		}
+
+	Reconnect:
+		log.Println("Attempting to reconnect to RabbitMQ...")
+		// Close the old connection just in case
+		mqConnection.Close()
+		// Wait a bit before trying to establish a new connection
+		time.Sleep(5 * time.Second)
+		// Attempt to create a new connection
+		newMqConnection, err := messaging.NewConnection(cfg.RabbitMQURL)
+		if err != nil {
+			log.Printf("Failed to reconnect to RabbitMQ: %v", err)
+			// Continue the outer loop to try again
+			continue
+		}
+		mqConnection = newMqConnection
 	}
-
-	wg.Wait()
 }
 
 func worker(id int, wg *sync.WaitGroup, jobs <-chan amqp.Delivery, pgConnection *database.PostgresConnection, minioConnection *database.MinioConnection, qdrantConnection *database.QdrantConnection) {
 	defer wg.Done()
-	for d := range jobs {
+	for j := range jobs {
 		var embedMsg models.ReadmeEmbedMessage
-		if err := json.Unmarshal(d.Body, &embedMsg); err != nil {
+		if err := json.Unmarshal(j.Body, &embedMsg); err != nil {
 			log.Printf("Worker %d: Failed to unmarshal message: %v", id, err)
-			d.Ack(false)
+			j.Nack(false, false) // Nack and don't requeue
 			continue
 		}
 
-		log.Printf("Worker %d: Received message to embed README for repository ID: %d", id, embedMsg.RepositoryID)
-
-		// 1. Query PostgreSQL for repository metadata (pushed_at)
-		repo, err := pgConnection.GetRepositoryByID(embedMsg.RepositoryID)
-		if err != nil {
-			log.Printf("Worker %d: Failed to get repository by ID %d from Postgres: %v", id, embedMsg.RepositoryID, err)
-			d.Nack(false, true) // Requeue for retry
-			continue
-		}
-
-		// 3. Fetch README content from MinIO
-		readmeContent, err := minioConnection.GetFile(context.Background(), embedMsg.MinioPath)
-		if err != nil {
-			log.Printf("Worker %d: Failed to get README from MinIO for %s: %v", id, embedMsg.MinioPath, err)
-			// 4. Fallback: Download README directly if not in MinIO
-			if repo.ReadmeURL.Valid && repo.ReadmeURL.String != "" {
-				log.Printf("Worker %d: Attempting to download README from %s", id, repo.ReadmeURL.String)
-				resp, httpErr := http.Get(repo.ReadmeURL.String)
-				if httpErr != nil || resp.StatusCode != http.StatusOK {
-					log.Printf("Worker %d: Failed to download README from URL %s: %v", id, repo.ReadmeURL.String, httpErr)
-					d.Ack(false)
-					continue
-				}
-				defer resp.Body.Close()
-				readmeContent, err = io.ReadAll(resp.Body)
-				if err != nil {
-					log.Printf("Worker %d: Failed to read downloaded README content: %v", id, err)
-					d.Ack(false)
-					continue
-				}
-				// Save the downloaded README to MinIO
-				reader := bytes.NewReader(readmeContent)
-				_, err := minioConnection.UploadFile(context.Background(), embedMsg.MinioPath, reader, int64(len(readmeContent)), "text/markdown")
-				if err != nil {
-					log.Printf("Worker %d: Failed to upload downloaded README to MinIO for %s: %v", id, embedMsg.MinioPath, err)
-				} else {
-					log.Printf("Worker %d: Successfully cached README for %s in MinIO", id, embedMsg.MinioPath)
-				}
-			} else {
-				log.Printf("Worker %d: No README URL available for repo %d, skipping embedding.", id, embedMsg.RepositoryID)
-				d.Ack(false)
-				continue
-			}
-		}
-
-		// 5. Generate embedding (Placeholder - actual model integration needed)
-		// For now, create a dummy embedding
-		embedding := generateEmbedding(readmeContent)
-
-		// 6. Save embedding to Qdrant
-		points := []*qdrant_go_client.PointStruct{
-			{
-				Id:      &qdrant_go_client.PointId{PointIdOptions: &qdrant_go_client.PointId_Num{Num: uint64(embedMsg.RepositoryID)}},
-				Vectors: &qdrant_go_client.Vectors{VectorsOptions: &qdrant_go_client.Vectors_Vector{Vector: &qdrant_go_client.Vector{Data: embedding}}},
-			},
-		}
-		if err := qdrantConnection.UpsertVectors(context.Background(), "repositories", points); err != nil {
-			log.Printf("Worker %d: Failed to insert embedding for repo %d into Qdrant: %v", id, embedMsg.RepositoryID, err)
-			d.Nack(false, true) // Requeue for retry
-			continue
-		}
-
-		log.Printf("Worker %d: Successfully processed and embedded README for repository ID: %d", id, embedMsg.RepositoryID)
-		d.Ack(false)
+		log.Printf("Worker %d: Received message for repository ID: %d", id, embedMsg.RepositoryID)
+		processMessage(id, embedMsg, pgConnection, minioConnection, qdrantConnection)
+		j.Ack(false) // Ack the message
+		log.Printf("Worker %d: Finished processing message for repository ID: %d", id, embedMsg.RepositoryID)
 	}
 }
 
+func processMessage(
+	id int,
+	embedMsg models.ReadmeEmbedMessage,
+	pgConnection *database.PostgresConnection,
+	minioConnection *database.MinioConnection,
+	qdrantConnection *database.QdrantConnection,
+) {
+	// Explicitly nil the slice after use to help the GC
+	var readmeContent []byte
+	defer func() {
+		readmeContent = nil
+		runtime.GC()
+	}()
+
+	readmeContent, err := minioConnection.GetFile(context.Background(), embedMsg.MinioPath)
+	if err != nil {
+		log.Printf("Worker %d: Failed to get README from MinIO for %s: %v", id, embedMsg.MinioPath, err)
+		if embedMsg.DownloadURL != "" {
+			log.Printf("Worker %d: Attempting to download README from %s", id, embedMsg.DownloadURL)
+			resp, httpErr := http.Get(embedMsg.DownloadURL)
+			if httpErr != nil || resp.StatusCode != http.StatusOK {
+				log.Printf("Worker %d: Failed to download README from URL %s: %v", id, embedMsg.DownloadURL, httpErr)
+				return
+			}
+			defer resp.Body.Close()
+			readmeContent, err = io.ReadAll(resp.Body)
+			if err != nil {
+				log.Printf("Worker %d: Failed to read downloaded README content: %v", id, err)
+				return
+			}
+			reader := bytes.NewReader(readmeContent)
+			_, err := minioConnection.UploadFile(context.Background(), embedMsg.MinioPath, reader, int64(len(readmeContent)), "text/markdown")
+			if err != nil {
+				log.Printf("Worker %d: Failed to upload downloaded README to MinIO for %s: %v", id, embedMsg.MinioPath, err)
+			} else {
+				log.Printf("Worker %d: Successfully cached README for %s in MinIO", id, embedMsg.MinioPath)
+			}
+		} else {
+			log.Printf("Worker %d: No README URL available for repo %d, skipping embedding.", id, embedMsg.RepositoryID)
+			return
+		}
+	}
+
+	embedding := generateEmbedding(readmeContent)
+
+	points := []*qdrant_go_client.PointStruct{
+		{
+			Id:      &qdrant_go_client.PointId{PointIdOptions: &qdrant_go_client.PointId_Num{Num: uint64(embedMsg.RepositoryID)}},
+			Vectors: &qdrant_go_client.Vectors{VectorsOptions: &qdrant_go_client.Vectors_Vector{Vector: &qdrant_go_client.Vector{Data: embedding}}},
+		},
+	}
+	if err := qdrantConnection.UpsertVectors(context.Background(), "repositories", points); err != nil {
+		log.Printf("Worker %d: Failed to insert embedding for repo %d into Qdrant: %v", id, embedMsg.RepositoryID, err)
+		return
+	}
+
+	log.Printf("Worker %d: Successfully processed and embedded README for repository ID: %d", id, embedMsg.RepositoryID)
+}
+
 func generateEmbedding(content []byte) []float32 {
-	// Prepare the request body
 	requestBody, err := json.Marshal(map[string]string{
 		"text": string(content),
 	})
@@ -166,7 +207,6 @@ func generateEmbedding(content []byte) []float32 {
 		return nil
 	}
 
-	// Make a POST request to the embedding API service
 	resp, err := http.Post("http://embedding-api-service/embed", "application/json", bytes.NewBuffer(requestBody))
 	if err != nil {
 		log.Printf("Failed to call embedding API: %v", err)
@@ -180,7 +220,6 @@ func generateEmbedding(content []byte) []float32 {
 		return nil
 	}
 
-	// Decode the response
 	var result map[string][]float32
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		log.Printf("Failed to decode embedding response: %v", err)

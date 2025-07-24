@@ -3,6 +3,7 @@ package processor
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -10,11 +11,12 @@ import (
 	"net/http"
 
 	"github.com/teomiscia/github-trending/internal/database"
+	"github.com/teomiscia/github-trending/internal/github"
 	"github.com/teomiscia/github-trending/internal/messaging"
 	"github.com/teomiscia/github-trending/internal/models"
 )
 
-func RunProcessor(mqConnection messaging.MQConnection, pgConnection database.DBConnection, chConnection database.CHConnection, minioConnection database.MinioClient, httpClient *http.Client, processQueueName, readmeEmbedQueueName string) error {
+func RunProcessor(mqConnection messaging.MQConnection, pgConnection database.DBConnection, chConnection database.CHConnection, minioConnection database.MinioClient, githubClient *github.GitHubClient, httpClient *http.Client, processQueueName, readmeEmbedQueueName string) error {
 	msgs, err := mqConnection.Consume(processQueueName)
 	if err != nil {
 		return fmt.Errorf("failed to start consuming from queue %s: %w", processQueueName, err)
@@ -31,6 +33,14 @@ func RunProcessor(mqConnection messaging.MQConnection, pgConnection database.DBC
 		}
 
 		log.Printf("Processing data for repository: %s", crawlResult.Repository.FullName)
+
+		// Get README URL
+		readmeURL, err := githubClient.GetReadme(crawlResult.Repository.FullName)
+		if err != nil {
+			log.Printf("Failed to get README for %s: %v", crawlResult.Repository.FullName, err)
+		} else {
+			crawlResult.Repository.ReadmeURL = sql.NullString{String: readmeURL, Valid: true}
+		}
 
 		if err := pgConnection.InsertRepository(crawlResult.Repository, crawlResult.CrawledAt); err != nil {
 			log.Printf("Failed to insert repository into PostgreSQL: %v", err)
@@ -62,6 +72,7 @@ func RunProcessor(mqConnection messaging.MQConnection, pgConnection database.DBC
 					embedMsg := models.ReadmeEmbedMessage{
 						RepositoryID: int64(crawlResult.Repository.ID),
 						MinioPath:    objectName,
+						DownloadURL:  crawlResult.Repository.ReadmeURL.String,
 					}
 					embedMsgJSON, err := json.Marshal(embedMsg)
 					if err != nil {

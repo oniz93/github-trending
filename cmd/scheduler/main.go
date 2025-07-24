@@ -8,15 +8,28 @@ import (
 	"github.com/teomiscia/github-trending/internal/messaging"
 )
 
+const (
+	maxRetries = 5
+	retryDelay = 5 * time.Second
+)
+
 func main() {
 	cfg, err := config.Load()
 	if err != nil {
 		log.Fatalf("Failed to load configuration: %v", err)
 	}
 
-	mqConnection, err := messaging.NewConnection(cfg.RabbitMQURL)
+	var mqConnection *messaging.RabbitMQConnection
+	for i := 0; i < maxRetries; i++ {
+		mqConnection, err = messaging.NewConnection(cfg.RabbitMQURL)
+		if err == nil {
+			break
+		}
+		log.Printf("Failed to connect to RabbitMQ: %v. Retrying in %v...", err, retryDelay)
+		time.Sleep(retryDelay)
+	}
 	if err != nil {
-		log.Fatalf("Failed to connect to RabbitMQ: %v", err)
+		log.Fatalf("Failed to connect to RabbitMQ after %d retries: %v", maxRetries, err)
 	}
 	defer mqConnection.Close()
 

@@ -65,6 +65,18 @@ func (c *QdrantConnection) CreateCollection(ctx context.Context, collectionName 
 }
 
 func (c *QdrantConnection) UpsertVectors(ctx context.Context, collectionName string, points []*qdrant_go_client.PointStruct) error {
+	// Add the id to the payload
+	for _, point := range points {
+		if point.Payload == nil {
+			point.Payload = make(map[string]*qdrant_go_client.Value)
+		}
+		point.Payload["id"] = &qdrant_go_client.Value{
+			Kind: &qdrant_go_client.Value_IntegerValue{
+				IntegerValue: int64(point.GetId().GetNum()),
+			},
+		}
+	}
+
 	wait := true
 	_, err := c.pointsClient.Upsert(ctx, &qdrant_go_client.UpsertPoints{
 		CollectionName: collectionName,
@@ -97,6 +109,11 @@ func (c *QdrantConnection) Search(ctx context.Context, collectionName string, ve
 		},
 		WithVectors: &qdrant_go_client.WithVectorsSelector{
 			SelectorOptions: &qdrant_go_client.WithVectorsSelector_Enable{
+				Enable: true,
+			},
+		},
+		WithPayload: &qdrant_go_client.WithPayloadSelector{
+			SelectorOptions: &qdrant_go_client.WithPayloadSelector_Enable{
 				Enable: true,
 			},
 		},

@@ -373,3 +373,57 @@ func (c *GitHubClient) GetLanguages(repoFullName string) (map[string]int, error)
 		return languages, nil
 	}
 }
+
+// GetReadme fetches the README for a repository.
+func (c *GitHubClient) GetReadme(repoFullName string) (string, error) {
+	backoffTime := 5 * time.Second
+	for {
+		req, err := http.NewRequest("GET", fmt.Sprintf("%s/repos/%s/readme", c.baseURL, repoFullName), nil)
+		if err != nil {
+			return "", fmt.Errorf("failed to create request: %w", err)
+		}
+
+		req.Header.Set("Accept", "application/vnd.github.v3+json")
+		if c.token != "" {
+			req.Header.Set("Authorization", fmt.Sprintf("token %s", c.token))
+		}
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return "", fmt.Errorf("failed to perform request: %w", err)
+		}
+
+		if resp.StatusCode == http.StatusForbidden {
+			log.Printf("Rate limit hit for %s. Waiting for %v before retrying...", repoFullName, backoffTime)
+			time.Sleep(backoffTime)
+			backoffTime *= 2 // Double the backoff time for the next potential failure
+			resp.Body.Close()
+			continue
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			bodyBytes, _ := ioutil.ReadAll(resp.Body)
+			resp.Body.Close()
+			return "", fmt.Errorf("GitHub API returned non-200 status for %s: %d - %s", repoFullName, resp.StatusCode, string(bodyBytes))
+		}
+
+		backoffTime = 5 * time.Second // Reset backoff time on success
+
+		bodyBytes, err := ioutil.ReadAll(resp.Body)
+		if err != nil {
+			resp.Body.Close()
+			return "", fmt.Errorf("failed to read response body for %s: %w", repoFullName, err)
+		}
+		resp.Body.Close()
+
+		var readme struct {
+			DownloadURL string `json:"download_url"`
+		}
+		if err := json.Unmarshal(bodyBytes, &readme); err != nil {
+			return "", fmt.Errorf("failed to unmarshal response for %s: %w", repoFullName, err)
+		}
+
+		time.Sleep(2 * time.Second) // Wait 2 seconds between successful requests
+		return readme.DownloadURL, nil
+	}
+}

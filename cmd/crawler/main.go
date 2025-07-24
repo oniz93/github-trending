@@ -15,21 +15,42 @@ import (
 	"github.com/teomiscia/github-trending/internal/models"
 )
 
+const (
+	maxRetries = 5
+	retryDelay = 5 * time.Second
+)
+
 func main() {
 	cfg, err := config.Load()
 	if err != nil {
 		log.Fatalf("Failed to load configuration: %v", err)
 	}
 
-	mqConnection, err := messaging.NewConnection(cfg.RabbitMQURL)
+	var mqConnection *messaging.RabbitMQConnection
+	for i := 0; i < maxRetries; i++ {
+		mqConnection, err = messaging.NewConnection(cfg.RabbitMQURL)
+		if err == nil {
+			break
+		}
+		log.Printf("Failed to connect to RabbitMQ: %v. Retrying in %v...", err, retryDelay)
+		time.Sleep(retryDelay)
+	}
 	if err != nil {
-		log.Fatalf("Failed to connect to RabbitMQ: %v", err)
+		log.Fatalf("Failed to connect to RabbitMQ after %d retries: %v", maxRetries, err)
 	}
 	defer mqConnection.Close()
 
-	dbConnection, err := database.NewPostgresConnection(cfg.PostgresHost, "5432", cfg.PostgresUser, cfg.PostgresPassword, cfg.PostgresDB)
+	var dbConnection *database.PostgresConnection
+	for i := 0; i < maxRetries; i++ {
+		dbConnection, err = database.NewPostgresConnection(cfg.PostgresHost, "5432", cfg.PostgresUser, cfg.PostgresPassword, cfg.PostgresDB)
+		if err == nil {
+			break
+		}
+		log.Printf("Failed to connect to PostgreSQL: %v. Retrying in %v...", err, retryDelay)
+		time.Sleep(retryDelay)
+	}
 	if err != nil {
-		log.Fatalf("Failed to connect to PostgreSQL: %v", err)
+		log.Fatalf("Failed to connect to PostgreSQL after %d retries: %v", maxRetries, err)
 	}
 	defer dbConnection.DB.Close()
 
@@ -118,7 +139,7 @@ func runCrawler(mqConnection messaging.MQConnection, dbConnection database.DBCon
 	return nil
 }
 
-func findReadme(client *http.Client, repo *models.Repository, rawContentBaseURL string) string {
+func findReadme(client *http.IClient, repo *models.Repository, rawContentBaseURL string) string {
 	readmeNames := []string{"README.md", "README.txt"}
 
 	for _, name := range readmeNames {

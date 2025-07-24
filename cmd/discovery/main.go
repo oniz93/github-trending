@@ -13,8 +13,10 @@ import (
 )
 
 const (
-	maxStars = 1000000 // A reasonable upper bound for stars
-	minStars = 50      // The minimum stars to be considered
+	maxStars   = 1000000 // A reasonable upper bound for stars
+	minStars   = 50      // The minimum stars to be considered
+	maxRetries = 5
+	retryDelay = 5 * time.Second
 )
 
 var (
@@ -29,9 +31,16 @@ func main() {
 		log.Fatalf("Failed to load configuration: %v", err)
 	}
 
-	mqConnection, err = messaging.NewConnection(cfg.RabbitMQURL)
+	for i := 0; i < maxRetries; i++ {
+		mqConnection, err = messaging.NewConnection(cfg.RabbitMQURL)
+		if err == nil {
+			break
+		}
+		log.Printf("Failed to connect to RabbitMQ: %v. Retrying in %v...", err, retryDelay)
+		time.Sleep(retryDelay)
+	}
 	if err != nil {
-		log.Fatalf("Failed to connect to RabbitMQ: %v", err)
+		log.Fatalf("Failed to connect to RabbitMQ after %d retries: %v", maxRetries, err)
 	}
 	defer mqConnection.Close()
 

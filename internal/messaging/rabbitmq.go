@@ -69,7 +69,7 @@ func (c *Connection) Publish(queueName string, body []byte) error {
 	}
 	defer ch.Close()
 
-	_, err = ch.QueueDeclare(
+	q, err := ch.QueueDeclare(
 		queueName, // name
 		true,      // durable
 		false,     // delete when unused
@@ -83,15 +83,37 @@ func (c *Connection) Publish(queueName string, body []byte) error {
 
 	err = ch.Publish(
 		"",        // exchange
-		queueName, // routing key
+		q.Name,    // routing key
 		false,     // mandatory
 		false,     // immediate
 		amqp.Publishing{
-			ContentType: "text/plain",
+			ContentType: "application/json",
 			Body:        body,
 		})
 	if err != nil {
 		return fmt.Errorf("failed to publish a message: %w", err)
 	}
 	return nil
+}
+
+func (c *Connection) GetQueueMessageCount(queueName string) (int, error) {
+	ch, err := c.Channel()
+	if err != nil {
+		return 0, fmt.Errorf("failed to open a channel: %w", err)
+	}
+	defer ch.Close()
+
+	q, err := ch.QueueDeclare(
+		queueName, // name
+		true,      // durable
+		false,     // delete when unused
+		false,     // exclusive
+		false,     // no-wait
+		nil,       // arguments
+	)
+	if err != nil {
+		return 0, fmt.Errorf("failed to declare a queue: %w", err)
+	}
+
+	return q.Messages, nil
 }

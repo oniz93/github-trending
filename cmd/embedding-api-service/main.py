@@ -1,27 +1,11 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-import gensim
-from gensim import corpora
-from gensim.models import TfidfModel
-import pickle
+from sentence_transformers import SentenceTransformer
 
 app = FastAPI()
 
-# Load the pre-trained model and dictionary at startup
-model_path = 'tfidf_model.pkl'
-dict_path = 'dictionary.pkl'
-try:
-    with open(model_path, 'rb') as f:
-        tfidf = pickle.load(f)
-    with open(dict_path, 'rb') as f:
-        dictionary = pickle.load(f)
-except FileNotFoundError:
-    # Fallback for model creation if not found
-    documents = ["dummy text"]
-    texts = [[word for word in document.lower().split()] for document in documents]
-    dictionary = corpora.Dictionary(texts)
-    corpus = [dictionary.doc2bow(text) for text in texts]
-    tfidf = TfidfModel(corpus)
+# Load the pre-trained model at startup
+model = SentenceTransformer('all-MiniLM-L6-v2')
 
 class EmbedRequest(BaseModel):
     text: str
@@ -33,16 +17,9 @@ def health_check():
 @app.post("/embed")
 def create_embedding(request: EmbedRequest):
     try:
-        # Preprocess the text
-        processed_text = [word for word in request.text.lower().split()]
-        bow = dictionary.doc2bow(processed_text)
-
         # Generate embedding
-        embedding = tfidf[bow]
+        embedding = model.encode(request.text, convert_to_tensor=False).tolist()
 
-        # Convert to dense vector
-        dense_embedding = gensim.matutils.sparse2full(embedding, 384).tolist()
-
-        return {"embedding": dense_embedding}
+        return {"embedding": embedding}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

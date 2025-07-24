@@ -26,6 +26,7 @@ type CrawlResult struct {
 type ReadmeEmbedMessage struct {
 	RepositoryID int64  `json:"repository_id"`
 	MinioPath    string `json:"minio_path"`
+	DownloadURL  string `json:"download_url"`
 }
 
 type Repository struct {

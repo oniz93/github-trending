@@ -4,18 +4,22 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/redis/go-redis/v9"
-	"github.com/teomiscia/github-trending/internal/messaging"
-	"github.com/teomiscia/github-trending/internal/models"
 	"log"
 	"sync"
 	"time"
 
+	"github.com/redis/go-redis/v9"
 	"github.com/teomiscia/github-trending/internal/config"
 	"github.com/teomiscia/github-trending/internal/database"
+	"github.com/teomiscia/github-trending/internal/messaging"
+	"github.com/teomiscia/github-trending/internal/models"
 )
 
-const numWorkers = 10
+const (
+	numWorkers = 10
+	maxRetries = 5
+	retryDelay = 5 * time.Second
+)
 
 func main() {
 	cfg, err := config.Load()
@@ -23,15 +27,31 @@ func main() {
 		log.Fatalf("Failed to load configuration: %v", err)
 	}
 
-	mqConnection, err := messaging.NewConnection(cfg.RabbitMQURL)
+	var mqConnection *messaging.RabbitMQConnection
+	for i := 0; i < maxRetries; i++ {
+		mqConnection, err = messaging.NewConnection(cfg.RabbitMQURL)
+		if err == nil {
+			break
+		}
+		log.Printf("Failed to connect to RabbitMQ: %v. Retrying in %v...", err, retryDelay)
+		time.Sleep(retryDelay)
+	}
 	if err != nil {
-		log.Fatalf("Failed to connect to RabbitMQ: %v", err)
+		log.Fatalf("Failed to connect to RabbitMQ after %d retries: %v", maxRetries, err)
 	}
 	defer mqConnection.Close()
 
-	pgConnection, err := database.NewPostgresConnection(cfg.PostgresHost, "5432", cfg.PostgresUser, cfg.PostgresPassword, cfg.PostgresDB)
+	var pgConnection *database.PostgresConnection
+	for i := 0; i < maxRetries; i++ {
+		pgConnection, err = database.NewPostgresConnection(cfg.PostgresHost, "5432", cfg.PostgresUser, cfg.PostgresPassword, cfg.PostgresDB)
+		if err == nil {
+			break
+		}
+		log.Printf("Failed to connect to PostgreSQL: %v. Retrying in %v...", err, retryDelay)
+		time.Sleep(retryDelay)
+	}
 	if err != nil {
-		log.Fatalf("Failed to connect to PostgreSQL: %v", err)
+		log.Fatalf("Failed to connect to PostgreSQL after %d retries: %v", maxRetries, err)
 	}
 	defer pgConnection.DB.Close()
 
@@ -49,9 +69,17 @@ func main() {
 	}
 	defer qdrantConnection.Close()
 
-	redisClient, err := database.NewRedisClient(cfg.RedisHost, cfg.RedisPort, cfg.RedisPassword)
+	var redisClient *redis.Client
+	for i := 0; i < maxRetries; i++ {
+		redisClient, err = database.NewRedisClient(cfg.RedisHost, cfg.RedisPort, cfg.RedisPassword)
+		if err == nil {
+			break
+		}
+		log.Printf("Failed to connect to Redis: %v. Retrying in %v...", err, retryDelay)
+		time.Sleep(retryDelay)
+	}
 	if err != nil {
-		log.Fatalf("Failed to connect to Redis: %v", err)
+		log.Fatalf("Failed to connect to Redis after %d retries: %v", maxRetries, err)
 	}
 
 	// Run the similarity calculation once on startup
@@ -136,15 +164,53 @@ func processRepository(repoID int64, qdrantConnection *database.QdrantConnection
 		return
 	}
 
-	// 4. Connect to Redis and store this result in a Sorted Set.
-	redisKey := fmt.Sprintf("similar:%d", repoID)
-	var zMembers []redis.Z
-	for _, result := range searchResults {
-		zMembers = append(zMembers, redis.Z{Score: float64(result.GetScore()), Member: result.GetId().GetNum()})
+	
+
+	// 4. Get source repo topics and languages
+	sourceRepo, err := pgConnection.GetRepositoryByID(repoID)
+	if err != nil {
+		log.Printf("Failed to get source repo %d from Postgres: %v", repoID, err)
+		return
 	}
 
-	// 5. Store the similarity data in PostgreSQL.
-	jsonData, err := json.Marshal(zMembers)
+	// 5. Calculate new similarity scores
+	var newScores []redis.Z
+	for _, result := range searchResults {
+		var finalScore float64
+		candidateRepoID := int64(result.GetId().GetNum())
+
+		// Get candidate repo topics and languages
+		candidateRepo, err := pgConnection.GetRepositoryByID(candidateRepoID)
+		if err != nil {
+			log.Printf("Failed to get candidate repo %d from Postgres: %v", candidateRepoID, err)
+			continue
+		}
+
+		// Calculate topic similarity
+		topicScore := jaccardSimilarity(sourceRepo.Topics, candidateRepo.Topics)
+
+		// Calculate language similarity
+		var sourceLanguages []string
+		for lang := range sourceRepo.Languages {
+			sourceLanguages = append(sourceLanguages, lang)
+		}
+		var candidateLanguages []string
+		for lang := range candidateRepo.Languages {
+			candidateLanguages = append(candidateLanguages, lang)
+		}
+		languageScore := jaccardSimilarity(sourceLanguages, candidateLanguages)
+
+		// Combine scores
+		finalScore = (0.6 * float64(result.GetScore())) + (0.3 * topicScore) + (0.1 * languageScore)
+
+		newScores = append(newScores, redis.Z{Score: finalScore, Member: candidateRepoID})
+	}
+
+	// 6. Connect to Redis and store this result in a Sorted Set.
+	redisKey := fmt.Sprintf("similar:%d", repoID)
+
+	// 7. Store the similarity data in PostgreSQL.
+	jsonData, err := json.Marshal(newScores)
 	if err != nil {
 		log.Printf("Failed to marshal similarity data for repo %d: %v", repoID, err)
 		return
@@ -155,7 +221,7 @@ func processRepository(repoID int64, qdrantConnection *database.QdrantConnection
 		return
 	}
 
-	// 6. If the key exists in Redis, update it without touching the TTL.
+	// 8. If the key exists in Redis, update it without touching the TTL.
 	exists, err := redisClient.Exists(context.Background(), redisKey).Result()
 	if err != nil {
 		log.Printf("Failed to check if key exists in Redis for repo %d: %v", repoID, err)
@@ -163,8 +229,8 @@ func processRepository(repoID int64, qdrantConnection *database.QdrantConnection
 	}
 
 	if exists == 1 {
-		if len(zMembers) > 0 {
-			_, err = redisClient.ZAdd(context.Background(), redisKey, zMembers...).Result()
+		if len(newScores) > 0 {
+			_, err = redisClient.ZAdd(context.Background(), redisKey, newScores...).Result()
 			if err != nil {
 				log.Printf("Failed to store similarity list for repo %d in Redis: %v", repoID, err)
 				return
@@ -173,4 +239,31 @@ func processRepository(repoID int64, qdrantConnection *database.QdrantConnection
 	}
 
 	log.Printf("Successfully calculated and stored similarity for repo ID: %d", repoID)
+}
+
+func jaccardSimilarity(a, b []string) float64 {
+	setA := make(map[string]bool)
+	for _, item := range a {
+		setA[item] = true
+	}
+
+	setB := make(map[string]bool)
+	for _, item := range b {
+		setB[item] = true
+	}
+
+	intersection := 0
+	for item := range setA {
+		if setB[item] {
+			intersection++
+		}
+	}
+
+	union := len(setA) + len(setB) - intersection
+
+	if union == 0 {
+		return 0.0
+	}
+
+	return float64(intersection) / float64(union)
 }
