@@ -6,7 +6,7 @@ import 'package:github_trending_app/src/models/repository.dart';
 class ApiService {
   final String baseUrl;
 
-  ApiService({this.baseUrl = 'http://192.168.172.78:8080'});
+  ApiService({this.baseUrl = 'http://192.168.1.106:8080'});
 
   Future<Map<String, dynamic>> fetchRepositories({
     String? sessionId,
