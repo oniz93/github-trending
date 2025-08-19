@@ -3,9 +3,11 @@ package database
 import (
 	"database/sql"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go"
+	"github.com/mitchellh/hashstructure"
 	"github.com/teomiscia/github-trending/internal/models"
 )
 
@@ -44,12 +46,27 @@ func (ch *ClickHouseConnection) Close() error {
 
 // InsertRepositoryStats inserts repository statistics into the database.
 func (ch *ClickHouseConnection) InsertRepositoryStats(repo models.Repository) error {
+	newHash, err := ch.calculateRowHash(repo)
+	if err != nil {
+		return fmt.Errorf("failed to calculate row hash: %w", err)
+	}
+	newHashStr := strconv.FormatUint(newHash, 10)
+
+	latestHash, err := ch.GetLatestRowHash(repo.ID)
+	if err != nil && err != sql.ErrNoRows {
+		return fmt.Errorf("failed to get latest row hash: %w", err)
+	}
+
+	if newHashStr == latestHash {
+		return nil // Skip insert, no changes
+	}
+
 	tx, err := ch.DB.Begin()
 	if err != nil {
 		return err
 	}
 
-	stmt, err := tx.Prepare("INSERT INTO repository_stats (event_date, event_time, repository_id, stargazers_count, watchers_count, forks_count, open_issues_count, pushed_at, score) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+	stmt, err := tx.Prepare("INSERT INTO repository_stats (event_date, event_time, repository_id, stargazers_count, watchers_count, forks_count, open_issues_count, pushed_at, score, row_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
 	if err != nil {
 		return err
 	}
@@ -64,12 +81,45 @@ func (ch *ClickHouseConnection) InsertRepositoryStats(repo models.Repository) er
 		repo.OpenIssuesCount,
 		repo.PushedAt,
 		repo.Score,
+		newHashStr,
 	)
 	if err != nil {
 		return err
 	}
 
 	return tx.Commit()
+}
+
+func (ch *ClickHouseConnection) calculateRowHash(repo models.Repository) (uint64, error) {
+	// The fields used here should match the ones in the SQL migration script's sipHash64 function
+	hash, err := hashstructure.Hash(struct {
+		RepoID          int
+		StargazersCount int
+		WatchersCount   int
+		ForksCount      int
+		OpenIssuesCount int
+	}{
+		RepoID:          repo.ID,
+		StargazersCount: repo.StargazersCount,
+		WatchersCount:   repo.WatchersCount,
+		ForksCount:      repo.ForksCount,
+		OpenIssuesCount: repo.OpenIssuesCount,
+	}, nil)
+	if err != nil {
+		return 0, err
+	}
+	return hash,
+		nil
+}
+
+func (ch *ClickHouseConnection) GetLatestRowHash(repoID int) (string, error) {
+	var hash string
+	query := "SELECT row_hash FROM repository_stats WHERE repository_id = ? ORDER BY event_time DESC LIMIT 1"
+	err := ch.DB.QueryRow(query, repoID).Scan(&hash)
+	if err != nil {
+		return "", err
+	}
+	return hash, nil
 }
 
 // GetLastUpdateForRepository retrieves the last update timestamp for a given repository from ClickHouse.

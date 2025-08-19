@@ -26,7 +26,7 @@ func main() {
 		log.Fatalf("Failed to load configuration: %v", err)
 	}
 
-	var mqConnection *messaging.RabbitMQConnection
+	var mqConnection messaging.MQConnection
 	for i := 0; i < maxRetries; i++ {
 		mqConnection, err = messaging.NewConnection(cfg.RabbitMQURL)
 		if err == nil {
@@ -139,7 +139,7 @@ func runCrawler(mqConnection messaging.MQConnection, dbConnection database.DBCon
 	return nil
 }
 
-func findReadme(client *http.IClient, repo *models.Repository, rawContentBaseURL string) string {
+func findReadme(client *http.Client, repo *models.Repository, rawContentBaseURL string) string {
 	readmeNames := []string{"README.md", "README.txt"}
 
 	for _, name := range readmeNames {

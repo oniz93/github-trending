@@ -1,7 +1,7 @@
 // web/lib/src/providers/repository_provider.dart
 import 'package:flutter/material.dart';
-import 'package:github_trending_app/src/models/repository.dart';
-import 'package:github_trending_app/src/services/api_service.dart';
+import '../models/repository.dart';
+import '../services/api_service.dart';
 
 class RepositoryProvider with ChangeNotifier {
   final ApiService _apiService;

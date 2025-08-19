@@ -19,7 +19,7 @@ func main() {
 		log.Fatalf("Failed to load configuration: %v", err)
 	}
 
-	var mqConnection *messaging.RabbitMQConnection
+	var mqConnection messaging.MQConnection
 	for i := 0; i < maxRetries; i++ {
 		mqConnection, err = messaging.NewConnection(cfg.RabbitMQURL)
 		if err == nil {

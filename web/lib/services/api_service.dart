@@ -1,7 +1,7 @@
 // web/lib/src/services/api_service.dart
 import 'dart:convert';
 import 'package:http/http.dart' as http;
-import 'package:github_trending_app/src/models/repository.dart';
+import '../models/repository.dart';
 
 class ApiService {
   final String baseUrl;
