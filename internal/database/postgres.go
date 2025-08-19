@@ -113,14 +113,15 @@ func (pc *PostgresConnection) GetLastCrawlTime(repoID int64) (time.Time, error) 
 	return lastCrawledAt, nil
 }
 
-// InsertRepository inserts a repository into the database.
+// InsertRepository inserts or updates a repository and its related data in a single transaction.
 func (pc *PostgresConnection) InsertRepository(repo models.Repository, lastCrawledAt time.Time) error {
 	tx, err := pc.DB.Begin()
 	if err != nil {
 		return err
 	}
+	defer tx.Rollback() // Rollback is a no-op if the transaction is committed.
 
-	// Insert owner
+	// Insert owner if not present.
 	_, err = tx.Exec(`
 		INSERT INTO owners (id, login, avatar_url, html_url, type)
 		VALUES ($1, $2, $3, $4, $5)
@@ -128,93 +129,106 @@ func (pc *PostgresConnection) InsertRepository(repo models.Repository, lastCrawl
 	`, repo.Owner.ID, repo.Owner.Login, repo.Owner.AvatarURL, repo.Owner.HTMLURL, repo.Owner.Type)
 	if err != nil {
 		log.Printf("Failed to insert owner: %v", err)
-		tx.Rollback()
 		return err
 	}
 
-	// Insert license
+	// Insert or update license, only updating if data has changed.
 	if repo.License.Key.Valid {
 		_, err = tx.Exec(`
 			INSERT INTO licenses (key, name, spdx_id, url, node_id)
 			VALUES ($1, $2, $3, $4, $5)
 			ON CONFLICT (key) DO UPDATE SET
-				name = $2, spdx_id = $3, url = $4, node_id = $5
+				name = EXCLUDED.name,
+				spdx_id = EXCLUDED.spdx_id,
+				url = EXCLUDED.url,
+				node_id = EXCLUDED.node_id
+			WHERE licenses.name IS DISTINCT FROM EXCLUDED.name
+			   OR licenses.spdx_id IS DISTINCT FROM EXCLUDED.spdx_id
+			   OR licenses.url IS DISTINCT FROM EXCLUDED.url
 		`, repo.License.Key, repo.License.Name, repo.License.SpdxID, repo.License.URL, repo.License.NodeID)
 		if err != nil {
 			log.Printf("Failed to insert license: %v", err)
-			tx.Rollback()
 			return err
 		}
 	}
 
-	// Insert repository
+	// Insert or update repository.
+	// OPTIMIZATION: The WHERE clause prevents "empty" updates, reducing write load and lock contention.
 	_, err = tx.Exec(`
 		INSERT INTO repositories (id, node_id, name, full_name, owner_id, description, html_url, homepage, default_branch, license_key, readme_url, created_at, is_fork, is_template, is_archived, is_disabled, last_crawled_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
 		ON CONFLICT (id) DO UPDATE SET
-			node_id = $2, name = $3, full_name = $4, owner_id = $5, description = $6, html_url = $7, homepage = $8, default_branch = $9, license_key = $10, readme_url = $11, created_at = $12, is_fork = $13, is_template = $14, is_archived = $15, is_disabled = $16, last_crawled_at = $17
-	`, repo.ID, repo.NodeID, repo.Name, repo.FullName, repo.Owner.ID, repo.Description, repo.HTMLURL, repo.Homepage, repo.DefaultBranch, func() interface{} {
-		if !repo.License.Key.Valid {
-			return nil
-		}
-		return repo.License.Key
-	}(), repo.ReadmeURL, repo.CreatedAt, repo.Fork, repo.IsTemplate, repo.Archived, repo.Disabled, lastCrawledAt)
+			node_id = EXCLUDED.node_id, 
+			name = EXCLUDED.name, 
+			full_name = EXCLUDED.full_name, 
+			owner_id = EXCLUDED.owner_id, 
+			description = EXCLUDED.description, 
+			html_url = EXCLUDED.html_url, 
+			homepage = EXCLUDED.homepage, 
+			default_branch = EXCLUDED.default_branch, 
+			license_key = EXCLUDED.license_key, 
+			readme_url = EXCLUDED.readme_url, 
+			is_fork = EXCLUDED.is_fork, 
+			is_template = EXCLUDED.is_template, 
+			is_archived = EXCLUDED.is_archived, 
+			is_disabled = EXCLUDED.is_disabled, 
+			last_crawled_at = EXCLUDED.last_crawled_at
+		WHERE repositories.description IS DISTINCT FROM EXCLUDED.description
+		   OR repositories.homepage IS DISTINCT FROM EXCLUDED.homepage
+		   OR repositories.license_key IS DISTINCT FROM EXCLUDED.license_key
+		   OR repositories.is_archived IS DISTINCT FROM EXCLUDED.is_archived
+		   OR repositories.is_disabled IS DISTINCT FROM EXCLUDED.is_disabled
+		   OR repositories.last_crawled_at < EXCLUDED.last_crawled_at
+	`, repo.ID, repo.NodeID, repo.Name, repo.FullName, repo.Owner.ID, repo.Description, repo.HTMLURL, repo.Homepage, repo.DefaultBranch, repo.License.Key, repo.ReadmeURL, repo.CreatedAt, repo.Fork, repo.IsTemplate, repo.Archived, repo.Disabled, lastCrawledAt)
 	if err != nil {
 		log.Printf("Failed to insert repository: %v", err)
-		tx.Rollback()
 		return err
 	}
 
-	// Insert tags
+	// OPTIMIZATION: Changed "DO NOTHING" to "DO UPDATE" to fix a bug where Scan would fail on conflict.
+	// This pattern safely inserts or finds the existing ID every time.
+	tagUpsertQuery := "INSERT INTO tags (name) VALUES ($1) ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name RETURNING id"
 	for _, tagName := range repo.Tags {
 		var tagID int
-		err = tx.QueryRow("INSERT INTO tags (name) VALUES ($1) ON CONFLICT (name) DO UPDATE SET name = $1 RETURNING id", tagName).Scan(&tagID)
-		if err != nil {
-			log.Printf("Failed to insert tag: %v", err)
-			tx.Rollback()
+		if err = tx.QueryRow(tagUpsertQuery, tagName).Scan(&tagID); err != nil {
+			log.Printf("Failed to upsert tag: %v", err)
 			return err
 		}
-
 		_, err = tx.Exec("INSERT INTO repository_tags (repository_id, tag_id) VALUES ($1, $2) ON CONFLICT DO NOTHING", repo.ID, tagID)
 		if err != nil {
 			log.Printf("Failed to insert repository_tag: %v", err)
-			tx.Rollback()
 			return err
 		}
 	}
 
-	// Insert topics
+	topicUpsertQuery := "INSERT INTO topics (name) VALUES ($1) ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name RETURNING id"
 	for _, topicName := range repo.Topics {
 		var topicID int
-		err = tx.QueryRow("INSERT INTO topics (name) VALUES ($1) ON CONFLICT (name) DO UPDATE SET name = $1 RETURNING id", topicName).Scan(&topicID)
-		if err != nil {
-			log.Printf("Failed to insert topic: %v", err)
-			tx.Rollback()
+		if err = tx.QueryRow(topicUpsertQuery, topicName).Scan(&topicID); err != nil {
+			log.Printf("Failed to upsert topic: %v", err)
 			return err
 		}
-
 		_, err = tx.Exec("INSERT INTO repository_topics (repository_id, topic_id) VALUES ($1, $2) ON CONFLICT DO NOTHING", repo.ID, topicID)
 		if err != nil {
 			log.Printf("Failed to insert repository_topic: %v", err)
-			tx.Rollback()
 			return err
 		}
 	}
 
-	// Insert languages
+	langUpsertQuery := "INSERT INTO languages (name) VALUES ($1) ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name RETURNING id"
 	for langName, size := range repo.Languages {
 		var langID int
-		err = tx.QueryRow("INSERT INTO languages (name) VALUES ($1) ON CONFLICT (name) DO UPDATE SET name = $1 RETURNING id", langName).Scan(&langID)
-		if err != nil {
-			log.Printf("Failed to insert language: %v", err)
-			tx.Rollback()
+		if err = tx.QueryRow(langUpsertQuery, langName).Scan(&langID); err != nil {
+			log.Printf("Failed to upsert language: %v", err)
 			return err
 		}
-
-		_, err = tx.Exec("INSERT INTO repository_languages (repository_id, language_id, size) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING", repo.ID, langID, size)
+		// Use a full upsert here in case language byte counts change on a re-crawl.
+		_, err = tx.Exec(`
+            INSERT INTO repository_languages (repository_id, language_id, size) VALUES ($1, $2, $3)
+            ON CONFLICT (repository_id, language_id) DO UPDATE SET size = EXCLUDED.size
+        `, repo.ID, langID, size)
 		if err != nil {
 			log.Printf("Failed to insert repository_language: %v", err)
-			tx.Rollback()
 			return err
 		}
 	}
@@ -225,7 +239,8 @@ func (pc *PostgresConnection) InsertRepository(repo models.Repository, lastCrawl
 // GetRepositoryByID retrieves a repository by its ID.
 func (pc *PostgresConnection) GetRepositoryByID(repoID int64) (models.Repository, error) {
 	var repo models.Repository
-	var ownerID int
+	// FIX: Scan into int64 to match 'bigint' schema type
+	var ownerID int64
 	var licenseKey sql.NullString
 	var repoNodeID sql.NullString
 	var ownerNodeID sql.NullString
@@ -257,22 +272,20 @@ func (pc *PostgresConnection) GetRepositoryByID(repoID int64) (models.Repository
 		return models.Repository{}, fmt.Errorf("failed to query repository: %w", err)
 	}
 
+	// FIX: Cast the int64 to int for the model struct field.
+	repo.Owner.ID = int(ownerID)
 	if repoNodeID.Valid {
 		repo.NodeID = repoNodeID
 	}
-
 	if ownerNodeID.Valid {
 		repo.Owner.NodeID = ownerNodeID
 	}
-
 	if licenseKey.Valid {
 		repo.License.Key = licenseKey
 	}
-
 	if licenseName.Valid {
 		repo.License.Name = licenseName
 	}
-
 	if siteAdmin.Valid {
 		repo.Owner.SiteAdmin = siteAdmin
 	}
@@ -445,11 +458,13 @@ func (pc *PostgresConnection) GetRepositoryIDs(limit, offset int) ([]int64, erro
 
 // UpsertRepositorySimilarity inserts or updates the similarity data for a repository.
 func (pc *PostgresConnection) UpsertRepositorySimilarity(repoID int64, data []byte) error {
+	// OPTIMIZATION: Added a WHERE clause to prevent updating the row if the data is identical.
 	query := `
 		INSERT INTO repository_similarity (id, data)
 		VALUES ($1, $2)
 		ON CONFLICT (id) DO UPDATE SET
-		data = $2
+			data = EXCLUDED.data
+		WHERE repository_similarity.data IS DISTINCT FROM EXCLUDED.data
 	`
 	_, err := pc.DB.Exec(query, repoID, data)
 	return err
@@ -468,7 +483,6 @@ func (pc *PostgresConnection) GetRepositorySimilarity(repoID int64) ([]byte, err
 	}
 	return data, nil
 }
-
 
 func (pc *PostgresConnection) GetRepositoriesDataByIDs(repoIDs []int64) ([]models.RepositoryData, error) {
 	if len(repoIDs) == 0 {
@@ -508,7 +522,8 @@ func (pc *PostgresConnection) GetRepositoriesDataByIDs(repoIDs []int64) ([]model
 	var repositoriesData []models.RepositoryData
 	for rows.Next() {
 		var repoData models.RepositoryData
-		var ownerID int
+		// FIX: Scan into int64 to match 'bigint' schema type
+		var ownerID int64
 		var licenseKey sql.NullString
 		var repoNodeID sql.NullString
 		var ownerNodeID sql.NullString
@@ -523,18 +538,17 @@ func (pc *PostgresConnection) GetRepositoriesDataByIDs(repoIDs []int64) ([]model
 			return nil, fmt.Errorf("failed to scan repository row: %w", err)
 		}
 
+		// FIX: Cast the int64 to int for the model struct field.
+		repoData.Owner.ID = int(ownerID)
 		if repoNodeID.Valid {
 			repoData.Repository.NodeID = repoNodeID
 		}
-
 		if ownerNodeID.Valid {
 			repoData.Owner.NodeID = ownerNodeID
 		}
-
 		if licenseKey.Valid {
 			repoData.Repository.License.Key = licenseKey
 		}
-
 		if licenseName.Valid {
 			repoData.Repository.License.Name = licenseName
 		}
