@@ -158,6 +158,18 @@ services:
       replicas: 3
     depends_on:
       rabbitmq: { condition: service_healthy }
+      minio: { condition: service_healthy }
+    restart: unless-stopped
+    env_file:
+      - ./.env
+
+  writer-service:
+    build:
+      context: .
+      dockerfile: ./cmd/writer-service/Dockerfile
+    container_name: writer-service
+    depends_on:
+      rabbitmq: { condition: service_healthy }
       postgres: { condition: service_healthy }
       clickhouse: { condition: service_healthy }
     restart: unless-stopped

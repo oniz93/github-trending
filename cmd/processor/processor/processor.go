@@ -16,7 +16,7 @@ import (
 	"github.com/teomiscia/github-trending/internal/models"
 )
 
-func RunProcessor(mqConnection messaging.MQConnection, pgConnection database.DBConnection, chConnection database.CHConnection, minioConnection database.MinioClient, githubClient *github.GitHubClient, httpClient *http.Client, processQueueName, readmeEmbedQueueName string) error {
+func RunProcessor(mqConnection messaging.MQConnection, minioConnection database.MinioClient, githubClient *github.GitHubClient, httpClient *http.Client, processQueueName, writeQueueName, readmeEmbedQueueName string) error {
 	msgs, err := mqConnection.Consume(processQueueName)
 	if err != nil {
 		return fmt.Errorf("failed to start consuming from queue %s: %w", processQueueName, err)
@@ -42,15 +42,18 @@ func RunProcessor(mqConnection messaging.MQConnection, pgConnection database.DBC
 			crawlResult.Repository.ReadmeURL = sql.NullString{String: readmeURL, Valid: true}
 		}
 
-		if err := pgConnection.InsertRepository(crawlResult.Repository, crawlResult.CrawledAt); err != nil {
-			log.Printf("Failed to insert repository into PostgreSQL: %v", err)
+		// Publish to writer service to handle database inserts
+		writeMsgJSON, err := json.Marshal(crawlResult)
+		if err != nil {
+			log.Printf("Failed to marshal write message for %s: %v", crawlResult.Repository.FullName, err)
 			d.Ack(false)
 			continue
 		}
 
-		if err := chConnection.InsertRepositoryStats(crawlResult.Repository); err != nil {
-			log.Printf("Failed to insert repository stats into ClickHouse: %v", err)
-			d.Ack(false)
+		err = mqConnection.Publish(writeQueueName, writeMsgJSON)
+		if err != nil {
+			log.Printf("Failed to publish write message for %s: %v", crawlResult.Repository.FullName, err)
+			d.Nack(false, true) // Requeue for another attempt
 			continue
 		}
 
@@ -59,14 +62,12 @@ func RunProcessor(mqConnection messaging.MQConnection, pgConnection database.DBC
 			readmeContent, err := downloadReadme(httpClient, crawlResult.Repository.ReadmeURL.String)
 			if err != nil {
 				log.Printf("Failed to download README for %s: %v", crawlResult.Repository.FullName, err)
-				// Continue processing, but don't trigger embedding for this README
 			} else {
 				objectName := fmt.Sprintf("readmes/%d.md", crawlResult.Repository.ID)
 				reader := bytes.NewReader(readmeContent)
 				_, err := minioConnection.UploadFile(context.Background(), objectName, reader, int64(len(readmeContent)), "text/markdown")
 				if err != nil {
 					log.Printf("Failed to upload README to MinIO for %s: %v", crawlResult.Repository.FullName, err)
-					// Continue processing, but don't trigger embedding for this README
 				} else {
 					// Publish message to readme_to_embed queue
 					embedMsg := models.ReadmeEmbedMessage{
@@ -87,7 +88,7 @@ func RunProcessor(mqConnection messaging.MQConnection, pgConnection database.DBC
 			}
 		}
 
-		log.Printf("Successfully processed and stored data for: %s", crawlResult.Repository.FullName)
+		log.Printf("Successfully processed and published data for: %s", crawlResult.Repository.FullName)
 
 		d.Ack(false)
 	}

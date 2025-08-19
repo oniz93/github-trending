@@ -37,34 +37,6 @@ func main() {
 	}
 	defer mqConnection.Close()
 
-	var pgConnection *database.PostgresConnection
-	for i := 0; i < maxRetries; i++ {
-		pgConnection, err = database.NewPostgresConnection(cfg.PostgresHost, "5432", cfg.PostgresUser, cfg.PostgresPassword, cfg.PostgresDB)
-		if err == nil {
-			break
-		}
-		log.Printf("Failed to connect to PostgreSQL: %v. Retrying in %v...", err, retryDelay)
-		time.Sleep(retryDelay)
-	}
-	if err != nil {
-		log.Fatalf("Failed to connect to PostgreSQL after %d retries: %v", maxRetries, err)
-	}
-	defer pgConnection.DB.Close()
-
-	var chConnection *database.ClickHouseConnection
-	for i := 0; i < maxRetries; i++ {
-		chConnection, err = database.NewClickHouseConnection(cfg.ClickHouseHost, cfg.ClickHousePort, cfg.ClickHouseUser, cfg.ClickHousePassword, cfg.ClickHouseDB)
-		if err == nil {
-			break
-		}
-		log.Printf("Failed to connect to ClickHouse: %v. Retrying in %v...", err, retryDelay)
-		time.Sleep(retryDelay)
-	}
-	if err != nil {
-		log.Fatalf("Failed to connect to ClickHouse after %d retries: %v", maxRetries, err)
-	}
-	defer chConnection.DB.Close()
-
 	var minioConnection *database.MinioConnection
 	for i := 0; i < maxRetries; i++ {
 		minioConnection, err = database.NewMinioConnection(cfg.MinioEndpoint, cfg.MinioRootUser, cfg.MinioRootPassword)
@@ -81,9 +53,10 @@ func main() {
 	githubClient := github.NewGitHubClient(cfg.GitHubToken, http.DefaultClient)
 
 	processQueueName := "raw_data_to_process"
+	writeQueueName := "repos_to_write"
 	readmeEmbedQueueName := "readme_to_embed"
 
-	err = processor.RunProcessor(mqConnection, pgConnection, chConnection, minioConnection, githubClient, http.DefaultClient, processQueueName, readmeEmbedQueueName)
+	err = processor.RunProcessor(mqConnection, minioConnection, githubClient, http.DefaultClient, processQueueName, writeQueueName, readmeEmbedQueueName)
 	if err != nil {
 		log.Fatalf("Processor service failed: %v", err)
 	}
