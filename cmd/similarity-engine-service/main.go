@@ -27,6 +27,20 @@ func main() {
 		log.Fatalf("Failed to load configuration: %v", err)
 	}
 
+	var chConnection *database.ClickHouseConnection
+	for i := 0; i < maxRetries; i++ {
+		chConnection, err = database.NewClickHouseConnection(cfg.ClickHouseHost, cfg.ClickHousePort, cfg.ClickHouseUser, cfg.ClickHousePassword, cfg.ClickHouseDB)
+		if err == nil {
+			break
+		}
+		log.Printf("Failed to connect to ClickHouse: %v. Retrying in %v...", err, retryDelay)
+		time.Sleep(retryDelay)
+	}
+	if err != nil {
+		log.Fatalf("Failed to connect to ClickHouse after %d retries: %v", maxRetries, err)
+	}
+	defer chConnection.Close()
+
 	var mqConnection messaging.MQConnection
 	for i := 0; i < maxRetries; i++ {
 		mqConnection, err = messaging.NewConnection(cfg.RabbitMQURL)
@@ -81,10 +95,11 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to connect to Redis after %d retries: %v", maxRetries, err)
 	}
+	pgConnection.WithRedis(redisClient)
 
 	// Run the similarity calculation once on startup
 	log.Println("Similarity Engine service started. Running initial similarity calculation.")
-	calculateSimilarity(pgConnection, qdrantConnection, redisClient, cfg, mqConnection)
+	calculateSimilarity(pgConnection, qdrantConnection, redisClient, cfg, mqConnection, chConnection)
 
 	// Run the similarity calculation periodically
 	ticker := time.NewTicker(6 * time.Hour) // Run every 6 hours
@@ -93,16 +108,16 @@ func main() {
 	log.Println("Initial similarity calculation completed. Running similarity calculation periodically.")
 
 	for range ticker.C {
-		calculateSimilarity(pgConnection, qdrantConnection, redisClient, cfg, mqConnection)
+		calculateSimilarity(pgConnection, qdrantConnection, redisClient, cfg, mqConnection, chConnection)
 	}
 }
 
-func calculateSimilarity(pgConnection *database.PostgresConnection, qdrantConnection *database.QdrantConnection, redisClient *redis.Client, cfg *config.Config, mqConnection messaging.MQConnection) {
+func calculateSimilarity(pgConnection *database.PostgresConnection, qdrantConnection *database.QdrantConnection, redisClient *redis.Client, cfg *config.Config, mqConnection messaging.MQConnection, chConnection *database.ClickHouseConnection) {
 	log.Println("Starting similarity calculation...")
-	// 1. Fetch all repository IDs from PostgreSQL that have been updated within the LAST_UPDATE_CUT period.
-	repoIDs, err := pgConnection.GetRepositoryIDsUpdatedSince(time.Now().Add(-cfg.LastUpdateCut))
+	// 1. Fetch all repository IDs from ClickHouse that have been updated within the LAST_UPDATE_CUT period.
+	repoIDs, err := chConnection.GetRepositoryIDsToUpdate(time.Now().Add(-cfg.LastUpdateCut))
 	if err != nil {
-		log.Printf("Failed to get repository IDs from Postgres: %v", err)
+		log.Printf("Failed to get repository IDs from ClickHouse: %v", err)
 		return
 	}
 
@@ -163,8 +178,6 @@ func processRepository(repoID int64, qdrantConnection *database.QdrantConnection
 		log.Printf("Failed to search embeddings for repo %d in Qdrant: %v", repoID, err)
 		return
 	}
-
-	
 
 	// 4. Get source repo topics and languages
 	sourceRepo, err := pgConnection.GetRepositoryByID(repoID)

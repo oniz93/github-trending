@@ -46,6 +46,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to connect to Postgres after %d retries: %v", maxRetries, err)
 	}
+	postgresConnection.WithRedis(redisClient)
 
 	var clickhouseConnection *database.ClickHouseConnection
 	for i := 0; i < maxRetries; i++ {

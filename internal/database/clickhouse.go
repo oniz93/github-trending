@@ -155,3 +155,32 @@ func (ch *ClickHouseConnection) GetRepositoryStats(repoID int64) ([]models.Repos
 
 	return stats, nil
 }
+
+// GetRepositoryIDsToUpdate retrieves the repository IDs from ClickHouse that have been pushed to recently.
+func (ch *ClickHouseConnection) GetRepositoryIDsToUpdate(since time.Time) ([]int64, error) {
+	query := `
+		SELECT repository_id
+		FROM repository_stats
+		WHERE (repository_id, event_time) IN (
+			SELECT repository_id, max(event_time)
+			FROM repository_stats
+			GROUP BY repository_id
+		) AND pushed_at > ?
+	`
+	rows, err := ch.DB.Query(query, since)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var repoIDs []int64
+	for rows.Next() {
+		var repoID int64
+		if err := rows.Scan(&repoID); err != nil {
+			return nil, err
+		}
+		repoIDs = append(repoIDs, repoID)
+	}
+
+	return repoIDs, nil
+}

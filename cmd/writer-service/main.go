@@ -5,6 +5,7 @@ import (
 	"log"
 	"time"
 
+	"github.com/redis/go-redis/v9"
 	"github.com/streadway/amqp"
 	"github.com/teomiscia/github-trending/internal/config"
 	"github.com/teomiscia/github-trending/internal/database"
@@ -38,6 +39,19 @@ func main() {
 	}
 	defer mqConnection.Close()
 
+	var redisClient *redis.Client
+	for i := 0; i < maxRetries; i++ {
+		redisClient, err = database.NewRedisClient(cfg.RedisHost, cfg.RedisPort, cfg.RedisPassword)
+		if err == nil {
+			break
+		}
+		log.Printf("Failed to connect to Redis: %v. Retrying in %v...", err, retryDelay)
+		time.Sleep(retryDelay)
+	}
+	if err != nil {
+		log.Fatalf("Failed to connect to Redis after %d retries: %v", maxRetries, err)
+	}
+
 	var pgConnection *database.PostgresConnection
 	for i := 0; i < maxRetries; i++ {
 		pgConnection, err = database.NewPostgresConnection(cfg.PostgresHost, "5432", cfg.PostgresUser, cfg.PostgresPassword, cfg.PostgresDB)
@@ -51,6 +65,7 @@ func main() {
 		log.Fatalf("Failed to connect to PostgreSQL after %d retries: %v", maxRetries, err)
 	}
 	defer pgConnection.DB.Close()
+	pgConnection.WithRedis(redisClient)
 
 	var chConnection *database.ClickHouseConnection
 	for i := 0; i < maxRetries; i++ {

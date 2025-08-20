@@ -1,13 +1,18 @@
 package database
 
 import (
+	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"log"
 	"strings"
 	"time"
 
+	"github.com/golang/snappy"
 	_ "github.com/lib/pq"
+	"github.com/redis/go-redis/v9"
 	"github.com/teomiscia/github-trending/internal/models"
 )
 
@@ -21,7 +26,22 @@ type DBConnection interface {
 
 // PostgresConnection holds the database connection.
 type PostgresConnection struct {
-	DB *sql.DB
+	DB          *sql.DB
+	RedisClient *redis.Client
+}
+
+// WithRedis sets the Redis client for the PostgresConnection.
+func (pc *PostgresConnection) WithRedis(client *redis.Client) *PostgresConnection {
+	pc.RedisClient = client
+	return pc
+}
+
+func compress(data []byte) []byte {
+	return snappy.Encode(nil, data)
+}
+
+func decompress(data []byte) ([]byte, error) {
+	return snappy.Decode(nil, data)
 }
 
 // NewPostgresConnection creates a new connection to the PostgreSQL database.
@@ -52,6 +72,49 @@ func (pc *PostgresConnection) TrackRepositoryView(sessionID string, repositoryID
 
 // GetTrendingRepositoryIDs retrieves a list of trending repository IDs, filtered by languages, tags and seen repositories.
 func (pc *PostgresConnection) GetTrendingRepositoryIDs(languages, tags, topics, seenRepoIDs []string) ([]int64, error) {
+	if pc.RedisClient != nil {
+		var keyBuilder strings.Builder
+		keyBuilder.WriteString("trending_repos:")
+		keyBuilder.WriteString(strings.Join(languages, ","))
+		keyBuilder.WriteString(":")
+		keyBuilder.WriteString(strings.Join(tags, ","))
+		keyBuilder.WriteString(":")
+		keyBuilder.WriteString(strings.Join(topics, ","))
+		keyBuilder.WriteString(":")
+		keyBuilder.WriteString(strings.Join(seenRepoIDs, ","))
+
+		hash := sha256.Sum256([]byte(keyBuilder.String()))
+		key := fmt.Sprintf("trending:%x", hash)
+
+		val, err := pc.RedisClient.Get(context.Background(), key).Result()
+		if err == nil {
+			decompressed, err := decompress([]byte(val))
+			if err == nil {
+				var ids []int64
+				if err := json.Unmarshal(decompressed, &ids); err == nil {
+					return ids, nil
+				}
+			}
+		}
+
+		ids, err := pc.getTrendingRepositoryIDsFromDB(languages, tags, topics, seenRepoIDs)
+		if err != nil {
+			return nil, err
+		}
+
+		jsonBytes, err := json.Marshal(ids)
+		if err == nil {
+			compressed := compress(jsonBytes)
+			pc.RedisClient.Set(context.Background(), key, compressed, 10*time.Minute)
+		}
+
+		return ids, nil
+	}
+
+	return pc.getTrendingRepositoryIDsFromDB(languages, tags, topics, seenRepoIDs)
+}
+
+func (pc *PostgresConnection) getTrendingRepositoryIDsFromDB(languages, tags, topics, seenRepoIDs []string) ([]int64, error) {
 	query := "SELECT id FROM repositories"
 	args := []interface{}{}
 	whereClauses := []string{}
@@ -102,6 +165,20 @@ func (pc *PostgresConnection) GetTrendingRepositoryIDs(languages, tags, topics, 
 
 // GetLastCrawlTime retrieves the last time a repository was crawled.
 func (pc *PostgresConnection) GetLastCrawlTime(repoID int64) (time.Time, error) {
+	if pc.RedisClient != nil {
+		key := fmt.Sprintf("last_crawl_time:%d", repoID)
+		val, err := pc.RedisClient.Get(context.Background(), key).Result()
+		if err == nil {
+			decompressed, err := decompress([]byte(val))
+			if err == nil {
+				t, err := time.Parse(time.RFC3339Nano, string(decompressed))
+				if err == nil {
+					return t, nil
+				}
+			}
+		}
+	}
+
 	var lastCrawledAt time.Time
 	err := pc.DB.QueryRow("SELECT last_crawled_at FROM repositories WHERE id = $1", repoID).Scan(&lastCrawledAt)
 	if err != nil {
@@ -110,6 +187,13 @@ func (pc *PostgresConnection) GetLastCrawlTime(repoID int64) (time.Time, error) 
 		}
 		return time.Time{}, err
 	}
+
+	if pc.RedisClient != nil {
+		key := fmt.Sprintf("last_crawl_time:%d", repoID)
+		compressed := compress([]byte(lastCrawledAt.Format(time.RFC3339Nano)))
+		pc.RedisClient.Set(context.Background(), key, compressed, 1*time.Hour)
+	}
+
 	return lastCrawledAt, nil
 }
 
@@ -233,11 +317,60 @@ func (pc *PostgresConnection) InsertRepository(repo models.Repository, lastCrawl
 		}
 	}
 
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+
+	if pc.RedisClient != nil {
+		ctx := context.Background()
+		keys := []string{
+			fmt.Sprintf("repository:%d", repo.ID),
+			fmt.Sprintf("last_crawl_time:%d", repo.ID),
+			fmt.Sprintf("repository_data_by_id:%d", repo.ID),
+			fmt.Sprintf("tags:%d", repo.ID),
+			fmt.Sprintf("topics:%d", repo.ID),
+			fmt.Sprintf("languages:%d", repo.ID),
+		}
+		pc.RedisClient.Del(ctx, keys...)
+	}
+
+	return nil
 }
 
 // GetRepositoryByID retrieves a repository by its ID.
 func (pc *PostgresConnection) GetRepositoryByID(repoID int64) (models.Repository, error) {
+	if pc.RedisClient != nil {
+		key := fmt.Sprintf("repository:%d", repoID)
+		val, err := pc.RedisClient.Get(context.Background(), key).Result()
+		if err == nil {
+			decompressed, err := decompress([]byte(val))
+			if err == nil {
+				var repo models.Repository
+				if err := json.Unmarshal(decompressed, &repo); err == nil {
+					return repo, nil
+				}
+			}
+		}
+	}
+
+	repo, err := pc.getRepositoryByIDFromDB(repoID)
+	if err != nil {
+		return models.Repository{}, err
+	}
+
+	if pc.RedisClient != nil {
+		key := fmt.Sprintf("repository:%d", repo.ID)
+		jsonBytes, err := json.Marshal(repo)
+		if err == nil {
+			compressed := compress(jsonBytes)
+			pc.RedisClient.Set(context.Background(), key, compressed, 1*time.Hour)
+		}
+	}
+
+	return repo, nil
+}
+
+func (pc *PostgresConnection) getRepositoryByIDFromDB(repoID int64) (models.Repository, error) {
 	var repo models.Repository
 	// FIX: Scan into int64 to match 'bigint' schema type
 	var ownerID int64
@@ -315,6 +448,20 @@ func (pc *PostgresConnection) GetRepositoryByID(repoID int64) (models.Repository
 }
 
 func (pc *PostgresConnection) getTagsForRepository(repoID int64) ([]string, error) {
+	if pc.RedisClient != nil {
+		key := fmt.Sprintf("tags:%d", repoID)
+		val, err := pc.RedisClient.Get(context.Background(), key).Result()
+		if err == nil {
+			decompressed, err := decompress([]byte(val))
+			if err == nil {
+				var tags []string
+				if err := json.Unmarshal(decompressed, &tags); err == nil {
+					return tags, nil
+				}
+			}
+		}
+	}
+
 	rows, err := pc.DB.Query(`
 		SELECT
 			t.name
@@ -338,10 +485,34 @@ func (pc *PostgresConnection) getTagsForRepository(repoID int64) ([]string, erro
 		}
 		tags = append(tags, tag)
 	}
+
+	if pc.RedisClient != nil {
+		key := fmt.Sprintf("tags:%d", repoID)
+		jsonBytes, err := json.Marshal(tags)
+		if err == nil {
+			compressed := compress(jsonBytes)
+			pc.RedisClient.Set(context.Background(), key, compressed, 1*time.Hour)
+		}
+	}
+
 	return tags, nil
 }
 
 func (pc *PostgresConnection) getTopicsForRepository(repoID int64) ([]string, error) {
+	if pc.RedisClient != nil {
+		key := fmt.Sprintf("topics:%d", repoID)
+		val, err := pc.RedisClient.Get(context.Background(), key).Result()
+		if err == nil {
+			decompressed, err := decompress([]byte(val))
+			if err == nil {
+				var topics []string
+				if err := json.Unmarshal(decompressed, &topics); err == nil {
+					return topics, nil
+				}
+			}
+		}
+	}
+
 	rows, err := pc.DB.Query(`
 		SELECT
 			t.name
@@ -365,10 +536,34 @@ func (pc *PostgresConnection) getTopicsForRepository(repoID int64) ([]string, er
 		}
 		topics = append(topics, topic)
 	}
+
+	if pc.RedisClient != nil {
+		key := fmt.Sprintf("topics:%d", repoID)
+		jsonBytes, err := json.Marshal(topics)
+		if err == nil {
+			compressed := compress(jsonBytes)
+			pc.RedisClient.Set(context.Background(), key, compressed, 1*time.Hour)
+		}
+	}
+
 	return topics, nil
 }
 
 func (pc *PostgresConnection) getLanguagesForRepository(repoID int64) (map[string]int, error) {
+	if pc.RedisClient != nil {
+		key := fmt.Sprintf("languages:%d", repoID)
+		val, err := pc.RedisClient.Get(context.Background(), key).Result()
+		if err == nil {
+			decompressed, err := decompress([]byte(val))
+			if err == nil {
+				var languages map[string]int
+				if err := json.Unmarshal(decompressed, &languages); err == nil {
+					return languages, nil
+				}
+			}
+		}
+	}
+
 	rows, err := pc.DB.Query(`
 		SELECT
 			l.name, rl.size
@@ -393,6 +588,16 @@ func (pc *PostgresConnection) getLanguagesForRepository(repoID int64) (map[strin
 		}
 		languages[name] = size
 	}
+
+	if pc.RedisClient != nil {
+		key := fmt.Sprintf("languages:%d", repoID)
+		jsonBytes, err := json.Marshal(languages)
+		if err == nil {
+			compressed := compress(jsonBytes)
+			pc.RedisClient.Set(context.Background(), key, compressed, 1*time.Hour)
+		}
+	}
+
 	return languages, nil
 }
 
@@ -485,6 +690,59 @@ func (pc *PostgresConnection) GetRepositorySimilarity(repoID int64) ([]byte, err
 }
 
 func (pc *PostgresConnection) GetRepositoriesDataByIDs(repoIDs []int64) ([]models.RepositoryData, error) {
+	if len(repoIDs) == 0 {
+		return []models.RepositoryData{}, nil
+	}
+
+	if pc.RedisClient != nil {
+		var results []models.RepositoryData
+		var missedIDs []int64
+		keys := make([]string, len(repoIDs))
+		for i, id := range repoIDs {
+			keys[i] = fmt.Sprintf("repository_data_by_id:%d", id)
+		}
+
+		cachedResults, err := pc.RedisClient.MGet(context.Background(), keys...).Result()
+		if err == nil {
+			for i, res := range cachedResults {
+				if res != nil {
+					var repoData models.RepositoryData
+					decompressed, err := decompress([]byte(res.(string)))
+					if err == nil {
+						if err := json.Unmarshal(decompressed, &repoData); err == nil {
+							results = append(results, repoData)
+							continue
+						}
+					}
+				}
+				missedIDs = append(missedIDs, repoIDs[i])
+			}
+		} else {
+			missedIDs = repoIDs
+		}
+
+		if len(missedIDs) > 0 {
+			dbResults, err := pc.getRepositoriesDataByIDsFromDB(missedIDs)
+			if err != nil {
+				return nil, err
+			}
+			for _, dbRes := range dbResults {
+				results = append(results, dbRes)
+				key := fmt.Sprintf("repository_data_by_id:%d", dbRes.Repository.ID)
+				jsonBytes, err := json.Marshal(dbRes)
+				if err == nil {
+					compressed := compress(jsonBytes)
+					pc.RedisClient.Set(context.Background(), key, compressed, 1*time.Hour)
+				}
+			}
+		}
+		return results, nil
+	}
+
+	return pc.getRepositoriesDataByIDsFromDB(repoIDs)
+}
+
+func (pc *PostgresConnection) getRepositoriesDataByIDsFromDB(repoIDs []int64) ([]models.RepositoryData, error) {
 	if len(repoIDs) == 0 {
 		return []models.RepositoryData{}, nil
 	}
