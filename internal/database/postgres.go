@@ -372,25 +372,34 @@ func (pc *PostgresConnection) GetRepositoryByID(repoID int64) (models.Repository
 
 func (pc *PostgresConnection) getRepositoryByIDFromDB(repoID int64) (models.Repository, error) {
 	var repo models.Repository
-	// FIX: Scan into int64 to match 'bigint' schema type
 	var ownerID int64
 	var licenseKey sql.NullString
 	var repoNodeID sql.NullString
 	var ownerNodeID sql.NullString
 	var siteAdmin sql.NullBool
 	var licenseName sql.NullString
+	var tagsJSON, topicsJSON, languagesJSON []byte
 
 	row := pc.DB.QueryRow(`
 		SELECT
 			r.id, r.node_id, r.name, r.full_name, r.owner_id, r.description, r.html_url, r.homepage, r.default_branch, r.license_key, r.readme_url, r.created_at, r.is_fork, r.is_template, r.is_archived, r.is_disabled, r.last_crawled_at,
 			o.login, o.node_id, o.avatar_url, o.html_url, o.type, o.site_admin,
-			l.name, l.spdx_id, l.url, l.node_id
+			l.name, l.spdx_id, l.url, l.node_id,
+			COALESCE(tags.data, '[]'::jsonb) AS tags,
+			COALESCE(topics.data, '[]'::jsonb) AS topics,
+			COALESCE(languages.data, '{}'::jsonb) AS languages
 		FROM
 			repositories r
 		JOIN
 			owners o ON r.owner_id = o.id
 		LEFT JOIN
 			licenses l ON r.license_key = l.key
+		LEFT JOIN
+			(SELECT repository_id, jsonb_agg(t.name) AS data FROM repository_tags rt JOIN tags t ON rt.tag_id = t.id GROUP BY repository_id) AS tags ON r.id = tags.repository_id
+		LEFT JOIN
+			(SELECT repository_id, jsonb_agg(t.name) AS data FROM repository_topics rt JOIN topics t ON rt.topic_id = t.id GROUP BY repository_id) AS topics ON r.id = topics.repository_id
+		LEFT JOIN
+			(SELECT repository_id, jsonb_object_agg(l.name, rl.size) AS data FROM repository_languages rl JOIN languages l ON rl.language_id = l.id GROUP BY repository_id) AS languages ON r.id = languages.repository_id
 		WHERE
 			r.id = $1
 	`, repoID)
@@ -399,13 +408,13 @@ func (pc *PostgresConnection) getRepositoryByIDFromDB(repoID int64) (models.Repo
 		&repo.ID, &repoNodeID, &repo.Name, &repo.FullName, &ownerID, &repo.Description, &repo.HTMLURL, &repo.Homepage, &repo.DefaultBranch, &licenseKey, &repo.ReadmeURL, &repo.CreatedAt, &repo.Fork, &repo.IsTemplate, &repo.Archived, &repo.Disabled, &repo.LastCrawledAt,
 		&repo.Owner.Login, &ownerNodeID, &repo.Owner.AvatarURL, &repo.Owner.HTMLURL, &repo.Owner.Type, &siteAdmin,
 		&licenseName, &repo.License.SpdxID, &repo.License.URL, &repo.License.NodeID,
+		&tagsJSON, &topicsJSON, &languagesJSON,
 	)
 
 	if err != nil {
 		return models.Repository{}, fmt.Errorf("failed to query repository: %w", err)
 	}
 
-	// FIX: Cast the int64 to int for the model struct field.
 	repo.Owner.ID = int(ownerID)
 	if repoNodeID.Valid {
 		repo.NodeID = repoNodeID
@@ -423,182 +432,17 @@ func (pc *PostgresConnection) getRepositoryByIDFromDB(repoID int64) (models.Repo
 		repo.Owner.SiteAdmin = siteAdmin
 	}
 
-	// Fetch tags
-	tags, err := pc.getTagsForRepository(repoID)
-	if err != nil {
-		return models.Repository{}, fmt.Errorf("failed to get tags for repository: %w", err)
+	if err := json.Unmarshal(tagsJSON, &repo.Tags); err != nil {
+		return models.Repository{}, fmt.Errorf("failed to unmarshal tags: %w", err)
 	}
-	repo.Tags = tags
-
-	// Fetch topics
-	topics, err := pc.getTopicsForRepository(repoID)
-	if err != nil {
-		return models.Repository{}, fmt.Errorf("failed to get topics for repository: %w", err)
+	if err := json.Unmarshal(topicsJSON, &repo.Topics); err != nil {
+		return models.Repository{}, fmt.Errorf("failed to unmarshal topics: %w", err)
 	}
-	repo.Topics = topics
-
-	// Fetch languages
-	languages, err := pc.getLanguagesForRepository(repoID)
-	if err != nil {
-		return models.Repository{}, fmt.Errorf("failed to get languages for repository: %w", err)
+	if err := json.Unmarshal(languagesJSON, &repo.Languages); err != nil {
+		return models.Repository{}, fmt.Errorf("failed to unmarshal languages: %w", err)
 	}
-	repo.Languages = languages
 
 	return repo, nil
-}
-
-func (pc *PostgresConnection) getTagsForRepository(repoID int64) ([]string, error) {
-	if pc.RedisClient != nil {
-		key := fmt.Sprintf("tags:%d", repoID)
-		val, err := pc.RedisClient.Get(context.Background(), key).Result()
-		if err == nil {
-			decompressed, err := decompress([]byte(val))
-			if err == nil {
-				var tags []string
-				if err := json.Unmarshal(decompressed, &tags); err == nil {
-					return tags, nil
-				}
-			}
-		}
-	}
-
-	rows, err := pc.DB.Query(`
-		SELECT
-			t.name
-		FROM
-			tags t
-		JOIN
-			repository_tags rt ON t.id = rt.tag_id
-		WHERE
-			rt.repository_id = $1
-	`, repoID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var tags []string
-	for rows.Next() {
-		var tag string
-		if err := rows.Scan(&tag); err != nil {
-			return nil, err
-		}
-		tags = append(tags, tag)
-	}
-
-	if pc.RedisClient != nil {
-		key := fmt.Sprintf("tags:%d", repoID)
-		jsonBytes, err := json.Marshal(tags)
-		if err == nil {
-			compressed := compress(jsonBytes)
-			pc.RedisClient.Set(context.Background(), key, compressed, 1*time.Hour)
-		}
-	}
-
-	return tags, nil
-}
-
-func (pc *PostgresConnection) getTopicsForRepository(repoID int64) ([]string, error) {
-	if pc.RedisClient != nil {
-		key := fmt.Sprintf("topics:%d", repoID)
-		val, err := pc.RedisClient.Get(context.Background(), key).Result()
-		if err == nil {
-			decompressed, err := decompress([]byte(val))
-			if err == nil {
-				var topics []string
-				if err := json.Unmarshal(decompressed, &topics); err == nil {
-					return topics, nil
-				}
-			}
-		}
-	}
-
-	rows, err := pc.DB.Query(`
-		SELECT
-			t.name
-		FROM
-			topics t
-		JOIN
-			repository_topics rt ON t.id = rt.topic_id
-		WHERE
-			rt.repository_id = $1
-	`, repoID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var topics []string
-	for rows.Next() {
-		var topic string
-		if err := rows.Scan(&topic); err != nil {
-			return nil, err
-		}
-		topics = append(topics, topic)
-	}
-
-	if pc.RedisClient != nil {
-		key := fmt.Sprintf("topics:%d", repoID)
-		jsonBytes, err := json.Marshal(topics)
-		if err == nil {
-			compressed := compress(jsonBytes)
-			pc.RedisClient.Set(context.Background(), key, compressed, 1*time.Hour)
-		}
-	}
-
-	return topics, nil
-}
-
-func (pc *PostgresConnection) getLanguagesForRepository(repoID int64) (map[string]int, error) {
-	if pc.RedisClient != nil {
-		key := fmt.Sprintf("languages:%d", repoID)
-		val, err := pc.RedisClient.Get(context.Background(), key).Result()
-		if err == nil {
-			decompressed, err := decompress([]byte(val))
-			if err == nil {
-				var languages map[string]int
-				if err := json.Unmarshal(decompressed, &languages); err == nil {
-					return languages, nil
-				}
-			}
-		}
-	}
-
-	rows, err := pc.DB.Query(`
-		SELECT
-			l.name, rl.size
-		FROM
-			languages l
-		JOIN
-			repository_languages rl ON l.id = rl.language_id
-		WHERE
-			rl.repository_id = $1
-	`, repoID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	languages := make(map[string]int)
-	for rows.Next() {
-		var name string
-		var size int
-		if err := rows.Scan(&name, &size); err != nil {
-			return nil, err
-		}
-		languages[name] = size
-	}
-
-	if pc.RedisClient != nil {
-		key := fmt.Sprintf("languages:%d", repoID)
-		jsonBytes, err := json.Marshal(languages)
-		if err == nil {
-			compressed := compress(jsonBytes)
-			pc.RedisClient.Set(context.Background(), key, compressed, 1*time.Hour)
-		}
-	}
-
-	return languages, nil
 }
 
 // GetRepositoryIDsUpdatedSince retrieves a list of repository IDs that have been updated since a given time.
@@ -623,6 +467,20 @@ func (pc *PostgresConnection) GetRepositoryIDsUpdatedSince(since time.Time) ([]i
 
 // GetRecentClickedRepositoryIDs retrieves a list of recently clicked repository IDs for a given session.
 func (pc *PostgresConnection) GetRecentClickedRepositoryIDs(sessionID string, limit int) ([]int64, error) {
+	if pc.RedisClient != nil {
+		key := fmt.Sprintf("recent_clicks:%s:%d", sessionID, limit)
+		val, err := pc.RedisClient.Get(context.Background(), key).Result()
+		if err == nil {
+			decompressed, err := decompress([]byte(val))
+			if err == nil {
+				var ids []int64
+				if err := json.Unmarshal(decompressed, &ids); err == nil {
+					return ids, nil
+				}
+			}
+		}
+	}
+
 	rows, err := pc.DB.Query("SELECT repository_id FROM repository_views WHERE session_id = $1 ORDER BY viewed_at DESC LIMIT $2", sessionID, limit)
 	if err != nil {
 		return nil, err
@@ -638,11 +496,34 @@ func (pc *PostgresConnection) GetRecentClickedRepositoryIDs(sessionID string, li
 		ids = append(ids, id)
 	}
 
+	if pc.RedisClient != nil {
+		key := fmt.Sprintf("recent_clicks:%s:%d", sessionID, limit)
+		jsonBytes, err := json.Marshal(ids)
+		if err == nil {
+			compressed := compress(jsonBytes)
+			pc.RedisClient.Set(context.Background(), key, compressed, 5*time.Minute) // Cache for 5 minutes
+		}
+	}
+
 	return ids, nil
 }
 
 // GetRepositoryIDs retrieves a slice of repository IDs from the database.
 func (pc *PostgresConnection) GetRepositoryIDs(limit, offset int) ([]int64, error) {
+	if pc.RedisClient != nil {
+		key := fmt.Sprintf("repo_ids:%d:%d", limit, offset)
+		val, err := pc.RedisClient.Get(context.Background(), key).Result()
+		if err == nil {
+			decompressed, err := decompress([]byte(val))
+			if err == nil {
+				var ids []int64
+				if err := json.Unmarshal(decompressed, &ids); err == nil {
+					return ids, nil
+				}
+			}
+		}
+	}
+
 	rows, err := pc.DB.Query("SELECT id FROM repositories ORDER BY id LIMIT $1 OFFSET $2", limit, offset)
 	if err != nil {
 		return nil, err
@@ -656,6 +537,15 @@ func (pc *PostgresConnection) GetRepositoryIDs(limit, offset int) ([]int64, erro
 			return nil, err
 		}
 		ids = append(ids, id)
+	}
+
+	if pc.RedisClient != nil {
+		key := fmt.Sprintf("repo_ids:%d:%d", limit, offset)
+		jsonBytes, err := json.Marshal(ids)
+		if err == nil {
+			compressed := compress(jsonBytes)
+			pc.RedisClient.Set(context.Background(), key, compressed, 1*time.Hour) // Cache for 1 hour
+		}
 	}
 
 	return ids, nil
@@ -677,6 +567,14 @@ func (pc *PostgresConnection) UpsertRepositorySimilarity(repoID int64, data []by
 
 // GetRepositorySimilarity retrieves the similarity data for a repository.
 func (pc *PostgresConnection) GetRepositorySimilarity(repoID int64) ([]byte, error) {
+	if pc.RedisClient != nil {
+		key := fmt.Sprintf("similarity:%d", repoID)
+		val, err := pc.RedisClient.Get(context.Background(), key).Result()
+		if err == nil {
+			return decompress([]byte(val))
+		}
+	}
+
 	var data []byte
 	query := "SELECT data FROM repository_similarity WHERE id = $1"
 	err := pc.DB.QueryRow(query, repoID).Scan(&data)
@@ -686,6 +584,13 @@ func (pc *PostgresConnection) GetRepositorySimilarity(repoID int64) ([]byte, err
 		}
 		return nil, err
 	}
+
+	if pc.RedisClient != nil {
+		key := fmt.Sprintf("similarity:%d", repoID)
+		compressed := compress(data)
+		pc.RedisClient.Set(context.Background(), key, compressed, 24*time.Hour) // Cache for 24 hours
+	}
+
 	return data, nil
 }
 
@@ -747,31 +652,31 @@ func (pc *PostgresConnection) getRepositoriesDataByIDsFromDB(repoIDs []int64) ([
 		return []models.RepositoryData{}, nil
 	}
 
-	// Create a string of placeholders for the IN clause
-	placeholders := make([]string, len(repoIDs))
-	args := make([]interface{}, len(repoIDs))
-	for i, id := range repoIDs {
-		placeholders[i] = fmt.Sprintf("$%d", i+1)
-		args[i] = id
-	}
-	placeholderStr := strings.Join(placeholders, ",")
-
-	query := fmt.Sprintf(`
+	query := `
 		SELECT
 			r.id, r.node_id, r.name, r.full_name, r.description, r.html_url, r.homepage, r.default_branch, r.license_key, r.readme_url, r.created_at, r.is_fork, r.is_template, r.is_archived, r.is_disabled, r.last_crawled_at,
 			o.id, o.login, o.node_id, o.avatar_url, o.html_url, o.type,
-			l.name, l.spdx_id, l.url, l.node_id
+			l.name, l.spdx_id, l.url, l.node_id,
+			COALESCE(tags.data, '[]'::jsonb) AS tags,
+			COALESCE(topics.data, '[]'::jsonb) AS topics,
+			COALESCE(languages.data, '{}'::jsonb) AS languages
 		FROM
 			repositories r
 		JOIN
 			owners o ON r.owner_id = o.id
 		LEFT JOIN
 			licenses l ON r.license_key = l.key
+		LEFT JOIN
+			(SELECT repository_id, jsonb_agg(t.name) AS data FROM repository_tags rt JOIN tags t ON rt.tag_id = t.id GROUP BY repository_id) AS tags ON r.id = tags.repository_id
+		LEFT JOIN
+			(SELECT repository_id, jsonb_agg(t.name) AS data FROM repository_topics rt JOIN topics t ON rt.topic_id = t.id GROUP BY repository_id) AS topics ON r.id = topics.repository_id
+		LEFT JOIN
+			(SELECT repository_id, jsonb_object_agg(l.name, rl.size) AS data FROM repository_languages rl JOIN languages l ON rl.language_id = l.id GROUP BY repository_id) AS languages ON r.id = languages.repository_id
 		WHERE
-			r.id IN (%s)
-	`, placeholderStr)
+			r.id = ANY($1)
+	`
 
-	rows, err := pc.DB.Query(query, args...)
+	rows, err := pc.DB.Query(query, repoIDs)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query repositories by IDs: %w", err)
 	}
@@ -780,23 +685,23 @@ func (pc *PostgresConnection) getRepositoriesDataByIDsFromDB(repoIDs []int64) ([
 	var repositoriesData []models.RepositoryData
 	for rows.Next() {
 		var repoData models.RepositoryData
-		// FIX: Scan into int64 to match 'bigint' schema type
 		var ownerID int64
 		var licenseKey sql.NullString
 		var repoNodeID sql.NullString
 		var ownerNodeID sql.NullString
 		var licenseName sql.NullString
+		var tagsJSON, topicsJSON, languagesJSON []byte
 
 		err := rows.Scan(
 			&repoData.Repository.ID, &repoNodeID, &repoData.Repository.Name, &repoData.Repository.FullName, &repoData.Repository.Description, &repoData.Repository.HTMLURL, &repoData.Repository.Homepage, &repoData.Repository.DefaultBranch, &licenseKey, &repoData.Repository.ReadmeURL, &repoData.Repository.CreatedAt, &repoData.Repository.Fork, &repoData.Repository.IsTemplate, &repoData.Repository.Archived, &repoData.Repository.Disabled, &repoData.Repository.LastCrawledAt,
 			&ownerID, &repoData.Owner.Login, &ownerNodeID, &repoData.Owner.AvatarURL, &repoData.Owner.HTMLURL, &repoData.Owner.Type,
 			&licenseName, &repoData.Repository.License.SpdxID, &repoData.Repository.License.URL, &repoData.Repository.License.NodeID,
+			&tagsJSON, &topicsJSON, &languagesJSON,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan repository row: %w", err)
 		}
 
-		// FIX: Cast the int64 to int for the model struct field.
 		repoData.Owner.ID = int(ownerID)
 		if repoNodeID.Valid {
 			repoData.Repository.NodeID = repoNodeID
@@ -811,26 +716,15 @@ func (pc *PostgresConnection) getRepositoriesDataByIDsFromDB(repoIDs []int64) ([
 			repoData.Repository.License.Name = licenseName
 		}
 
-		// Fetch tags
-		tags, err := pc.getTagsForRepository(int64(repoData.Repository.ID))
-		if err != nil {
-			return nil, fmt.Errorf("failed to get tags for repository %d: %w", repoData.Repository.ID, err)
+		if err := json.Unmarshal(tagsJSON, &repoData.Tags); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal tags: %w", err)
 		}
-		repoData.Tags = tags
-
-		// Fetch topics
-		topics, err := pc.getTopicsForRepository(int64(repoData.Repository.ID))
-		if err != nil {
-			return nil, fmt.Errorf("failed to get topics for repository %d: %w", repoData.Repository.ID, err)
+		if err := json.Unmarshal(topicsJSON, &repoData.Repository.Topics); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal topics: %w", err)
 		}
-		repoData.Repository.Topics = topics
-
-		// Fetch languages
-		languages, err := pc.getLanguagesForRepository(int64(repoData.Repository.ID))
-		if err != nil {
-			return nil, fmt.Errorf("failed to get languages for repository %d: %w", repoData.Repository.ID, err)
+		if err := json.Unmarshal(languagesJSON, &repoData.Repository.Languages); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal languages: %w", err)
 		}
-		repoData.Repository.Languages = languages
 
 		repositoriesData = append(repositoriesData, repoData)
 	}

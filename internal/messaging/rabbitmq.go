@@ -10,6 +10,7 @@ type MQConnection interface {
 	Consume(queueName string) (<-chan amqp.Delivery, error)
 	Publish(queueName string, body []byte) error
 	Close() error
+	NotifyClose(chan *amqp.Error) chan *amqp.Error
 }
 
 // Connection represents a connection to RabbitMQ.

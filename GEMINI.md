@@ -1,68 +1,50 @@
-Excellent. Let's get you building. This is the most exciting phase of any project.
+This document provides a comprehensive technical blueprint of the GitHub Trending project. It is intended for a Large Language Model (LLM) to understand the architecture, code, and deployment of the system.
 
-This guide will provide a complete blueprint for your local development setup on macOS using Docker and Go. We will define the architecture, the project structure, and provide the initial configuration files and code stubs to get you started immediately.
+### Part 1: Core Architecture & Services
 
-### Part 1: The Core Architecture - A System of Microservices
+The system is a microservices-based application designed to discover, analyze, and serve trending GitHub repositories.
 
-Your intuition is spot on. We need to break this system down into small, independent services that each do one thing well. This makes the system easier to develop, test, debug, and scale. We'll add a couple more services to your initial list for a cleaner separation of concerns.
+**Services:**
 
-Here are the seven core microservices we will build:
+*   **`discovery-service` (Go):** Periodically searches the GitHub API for new repositories based on criteria like star count. Publishes found repositories to the `repos_to_crawl` queue.
+*   **`scheduler-service` (Go):** Periodically queries the database for existing repositories that need to be refreshed and publishes them to the `repos_to_crawl` queue.
+*   **`crawler-service` (Go):** Consumes repository information from the `repos_to_crawl` queue. Fetches detailed data for each repository from the GitHub API (stats, languages, tags, etc.) and publishes the raw data to the `raw_data_to_process` queue.
+*   **`processor-service` (Go):** Consumes from the `raw_data_to_process` queue. It processes the raw data, and then publishes messages to two queues: `repos_to_write` (for database storage) and `readme_to_embed` (for embedding generation).
+*   **`writer-service` (Go):** Consumes from the `repos_to_write` queue and writes the processed repository data to the PostgreSQL and ClickHouse databases.
+*   **`embedding-api-service` (Python/FastAPI):** A standalone API that exposes an endpoint (`/embed`) to generate sentence embeddings for a given text using a pre-trained SentenceTransformer model.
+*   **`embedding-autoscaler` (Go):** A smart proxy that sits in front of the `embedding-api-service`. It dynamically scales the number of `embedding-api-service` instances from 0 to a configured maximum based on request load. It also load-balances requests among the running instances.
+*   **`embedding-service` (Go):** Consumes from the `readme_to_embed` queue. It fetches the README content from MinIO, calls the `embedding-api-service` (via the autoscaler) to get the embedding, and stores the resulting vector in the Qdrant vector database.
+*   **`similarity-engine-service` (Go):** Periodically calculates similarity scores between repositories. It fetches embeddings from Qdrant, computes similarity, and stores the results in Redis for fast access.
+*   **`api-server` (Go):** The public-facing API for the application. It handles user requests, queries the databases (PostgreSQL, ClickHouse, Redis) to get trending and personalized repository data, and returns the results as JSON.
 
-1.  **`discovery-service`**: Its only job is to find *new* repositories to track. It will run periodically (e.g., once a day), use the GitHub Search API to find repositories matching our criteria (e.g., `stars:>50`), and push their URLs to a queue for the crawlers.
-2.  **`scheduler-service`**: Its only job is to schedule *refreshes* for repositories we already track. It will run continuously, query our own database for repositories that haven't been updated recently, and push their URLs to the same queue as the discovery service.
-3.  **`crawler-service`**: This is a simple worker. It pulls a repository URL from the queue, fetches all the necessary data from the GitHub API (stats, languages, README URL, etc.), and pushes the raw, unprocessed data to another queue.
-4.  **`processor-service`**: This is another worker. It pulls raw data from the crawler's output queue, parses and cleans it, then saves it to the appropriate databases (time-series stats to ClickHouse, metadata to PostgreSQL, and READMEs to MinIO). It also triggers the `embedding-service` when a new README is processed.
-5.  **`embedding-service`**: This service consumes messages about new READMEs, downloads their content (from MinIO or directly from GitHub), generates semantic embeddings using a pre-trained model, and stores these vectors in Qdrant (our vector database).
-6.  **`similarity-engine-service`**: This service runs periodically, fetches repository embeddings from Qdrant, calculates similarity scores between repositories, and stores pre-computed similarity lists in Redis for fast retrieval by the API server.
-7.  **`api-server`**: This is the public-facing service. It listens for HTTP requests from your web application, queries the databases to calculate trending data, and returns it as a clean JSON response. It now also provides personalized recommendations based on user interaction history, leveraging pre-computed similarity lists from Redis.
+**Data Flow:**
 
-This design creates a robust, one-way data flow:
+1.  `Discovery/Scheduler` -> `repos_to_crawl` (RabbitMQ)
+2.  `repos_to_crawl` -> `Crawler`
+3.  `Crawler` -> `raw_data_to_process` (RabbitMQ)
+4.  `raw_data_to_process` -> `Processor`
+5.  `Processor` -> `repos_to_write` (RabbitMQ)
+6.  `repos_to_write` -> `Writer Service` -> `PostgreSQL` & `ClickHouse`
+7.  `Processor` -> `readme_to_embed` (RabbitMQ)
+8.  `readme_to_embed` -> `Embedding Service` -> `MinIO` & `Embedding API` -> `Qdrant`
+9.  `Similarity Engine` -> `Qdrant` & `PostgreSQL` -> `Redis`
+10. `API Server` -> `PostgreSQL`, `ClickHouse`, `Redis` -> User
 
-`Discovery/Scheduler` -> `Crawl Queue` -> `Crawler` -> `Process Queue` -> `Processor` -> `Databases` <- `API Server`
-                                                                                                `Processor` -> `Embeddings Queue` -> `Embedding Service` -> `Qdrant`
-                                                                                                `Similarity Engine` -> `Qdrant` -> `Redis`
+### Part 2: Local Development & Deployment (Docker Swarm)
 
-### Part 2: Local Development Setup with Docker Compose
+The application is deployed as a Docker Swarm stack.
 
-`docker-compose` is the perfect tool to orchestrate all these services and their dependencies locally. We'll create one file to define and link everything.
-
-#### Step 1: Project Directory Structure
-
-First, create a root directory for your project. Inside it, we'll have a `docker-compose.yml` file and a directory for each of our Go services.
-
-```bash
-mkdir github-trending
-cd github-trending
-
-# Create directories for each Go microservice
-mkdir discovery-service
-mkdir scheduler-service
-mkdir crawler-service
-mkdir processor-service
-mkdir api-server
-mkdir embedding-service
-mkdir similarity-engine-service
-
-# Create a directory for shared Go code
-mkdir -p internal/database
-
-# Create the docker-compose file
-touch docker-compose.yml
-```
-
-#### Step 2: The `.env` File
-
-Create a `.env` file in the root of your project to store environment variables common to all services:
+**`.env` File:**
 
 ```dotenv
 RABBITMQ_URL=amqp://user:password@rabbitmq:5672/
-GITHUB_TOKEN=your-github-token
-GITHUB_CALLBACK_SECRET=your-github-callback-secret
+GITHUB_TOKEN=<your_github_token>
+GITHUB_CALLBACK_SECRET=<your_github_callback_secret>
 
 # RabbitMQ Credentials
 RABBITMQ_DEFAULT_USER=user
 RABBITMQ_DEFAULT_PASS=password
-RABBITMQ_ERLANG_COOKIE="ab3eLHd4xW1amBWjGqzDW6I9idDIFp9h4Tcbn80Iqg4="
+RABBITMQ_ERLANG_COOKIE="<a_secure_random_string>"
 
 # Postgres Credentials
 POSTGRES_HOST=postgres
@@ -92,13 +74,15 @@ QDRANT_HOST=qdrant_db
 QDRANT_PORT=6333
 
 # Recommendation Engine Configuration
-LAST_UPDATE_CUT=24 months
+LAST_UPDATE_CUT=12 months
 SIMILARITY_LIST_SIZE=200
+
+# Autoscaler configuration
+EMBEDDING_API_MAX_INSTANCES=3
+EMBEDDING_API_IDLE_TIMEOUT=600
 ```
 
-#### Step 3: The `docker-compose.yml` File
-
-This file is the heart of your local setup. It defines every container, its ports, environment variables, and how they connect.
+**`docker-compose.yml`:**
 
 ```yaml
 # github-trending/docker-compose.yml
@@ -110,8 +94,8 @@ services:
     image: rabbitmq:management-alpine
     container_name: rabbitmq
     ports:
-      - "5672:5672"    # AMQP port for services
-      - "15672:15672"  # Management UI
+      - "5672:5672"
+      - "15672:15672"
     volumes:
       - ./data/rabbitmq:/var/lib/rabbitmq/
     healthcheck:
@@ -123,7 +107,7 @@ services:
       - ./.env
 
   postgres:
-    image: postgres:17.5-alpine
+    image: postgres:17.6-alpine
     container_name: postgres_db
     env_file:
       - ./.env
@@ -131,19 +115,21 @@ services:
       - "5432:5432"
     volumes:
       - ./data/postgres:/var/lib/postgresql/data/
+      - ./postgres-init:/docker-entrypoint-initdb.d
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U user -d github_meta"]
       interval: 10s
       timeout: 5s
       retries: 5
+    command: postgres -c shared_preload_libraries=pg_stat_statements
 
   minio:
     image: minio/minio:latest
     container_name: minio_storage
     command: server /data --console-address ":9001"
     ports:
-      - "9000:9000"  # API port
-      - "9001:9001"  # Console UI
+      - "9000:9000"
+      - "9001:9001"
     env_file:
       - ./.env
     volumes:
@@ -158,8 +144,8 @@ services:
     image: clickhouse/clickhouse-server:latest
     container_name: clickhouse_db
     ports:
-      - "8123:8123" # HTTP interface
-      - "9009:9000" # TCP port for native client
+      - "8123:8123"
+      - "9009:9000"
     ulimits:
       nofile:
         soft: 262144
@@ -180,7 +166,7 @@ services:
     ports:
       - "6379:6379"
     volumes:
-      - redis_data:/data
+      - ./data/redis:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -192,32 +178,20 @@ services:
     container_name: qdrant_db
     ports:
       - "6333:6333"
+      - "6334:6334"
     volumes:
-      - qdrant_data:/qdrant/storage
+      - ./data/qdrant:/qdrant/storage
 
-  # --- APPLICATION SERVICES (Golang) ---
+  # --- APPLICATION SERVICES ---
 
   discovery:
     build:
       context: .
       dockerfile: ./cmd/discovery/Dockerfile
-    container_name: discovery
+    image: github-trending/discovery
     depends_on:
-      rabbitmq: { condition: service_healthy }
-      postgres: { condition: service_healthy }
-    restart: unless-stopped
-    env_file:
-      - ./.env
-    
-  scheduler:
-    build:
-      context: .
-      dockerfile: ./cmd/scheduler/Dockerfile
-    container_name: scheduler
-    depends_on:
-      rabbitmq: { condition: service_healthy }
-      postgres: { condition: service_healthy }
-    restart: unless-stopped
+      - rabbitmq
+      - postgres
     env_file:
       - ./.env
 
@@ -225,24 +199,36 @@ services:
     build:
       context: .
       dockerfile: ./cmd/crawler/Dockerfile
-    # Let's say we want to run 3 crawler instances
+    image: github-trending/crawler
     deploy:
-      replicas: 3
+      replicas: 6
     depends_on:
-      rabbitmq: { condition: service_healthy }
-    restart: unless-stopped
+      - rabbitmq
     env_file:
       - ./.env
-      
+
   processor:
     build:
       context: .
       dockerfile: ./cmd/processor/Dockerfile
-    container_name: processor
+    image: github-trending/processor
+    deploy:
+      replicas: 3
     depends_on:
-      rabbitmq: { condition: service_healthy }
-      postgres: { condition: service_healthy }
-    restart: unless-stopped
+      - rabbitmq
+      - minio
+    env_file:
+      - ./.env
+
+  writer-service:
+    build:
+      context: .
+      dockerfile: ./cmd/writer-service/Dockerfile
+    image: github-trending/writer-service
+    depends_on:
+      - rabbitmq
+      - postgres
+      - clickhouse
     env_file:
       - ./.env
 
@@ -250,16 +236,15 @@ services:
     build:
       context: .
       dockerfile: ./cmd/api/Dockerfile
-    container_name: api-server
+    image: github-trending/api-server
     ports:
       - "8080:8080"
     depends_on:
-      rabbitmq: { condition: service_healthy }
-      postgres: { condition: service_healthy }
-      clickhouse: { condition: service_healthy }
-      minio: { condition: service_healthy }
-      redis: { condition: service_healthy }
-    restart: unless-stopped
+      - rabbitmq
+      - postgres
+      - clickhouse
+      - minio
+      - redis
     env_file:
       - ./.env
 
@@ -267,105 +252,57 @@ services:
     build:
       context: .
       dockerfile: ./cmd/embedding-service/Dockerfile
-    container_name: embedding_service
+    image: github-trending/embedding-service
     depends_on:
-      rabbitmq: { condition: service_healthy }
-      postgres: { condition: service_healthy }
-      minio: { condition: service_healthy }
-      qdrant: { condition: service_healthy }
-    restart: unless-stopped
+      - rabbitmq
+      - postgres
+      - minio
+      - qdrant
     env_file:
       - ./.env
+
+  embedding-api-service:
+    build:
+      context: .
+      dockerfile: ./cmd/embedding-autoscaler/Dockerfile
+    image: github-trending/embedding-autoscaler
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    env_file:
+      - ./.env
+
+  embedding-api-instance:
+    build:
+      context: ./cmd/embedding-api-service
+    image: github-trending/embedding-api-service
+    deploy:
+      replicas: 0
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   similarity-engine-service:
     build:
       context: .
       dockerfile: ./cmd/similarity-engine-service/Dockerfile
-    container_name: similarity_engine_service
+    image: github-trending/similarity-engine-service
     depends_on:
-      postgres: { condition: service_healthy }
-      qdrant: { condition: service_healthy }
-      redis: { condition: service_healthy }
-    restart: unless-stopped
+      - postgres
+      - qdrant
+      - redis
     env_file:
       - ./.env
-
-volumes:
-  rabbitmq_data:
-  postgres_data:
-  minio_data:
-  clickhouse_data:
-  redis_data:
-  qdrant_data:
 ```
 
-#### Step 4: Generic Go `Dockerfile`
+**Deployment Workflow:**
 
-Inside each of your service directories (`crawler-service`, `api-server`, etc.), you will need a `Dockerfile`. We can use a single, efficient, multi-stage template for all of them.
+1.  **Initialize Swarm:** `docker swarm init`
+2.  **Build images:** `docker compose build`
+3.  **Deploy stack:** `docker stack deploy -c docker-compose.yml github-trending`
 
-Create this file in `github-trending/cmd/<service>/Dockerfile` (e.g., `github-trending/cmd/crawler/Dockerfile`):
-
-```dockerfile
-# github-trending/cmd/<service>/Dockerfile
-
-# --- Builder Stage ---
-# Use the official Go image as a builder.
-FROM golang:latest AS builder
-
-# Set the working directory inside the container.
-WORKDIR /app
-
-# Copy go.mod and go.sum files to download dependencies.
-COPY go.mod ./
-COPY go.sum ./
-RUN go mod download
-
-# Copy the internal shared code.
-COPY internal ./internal
-
-# Copy the rest of the application source code.
-COPY cmd/<service> .
-
-# Build the Go application.
-# -o /app/main specifies the output file.
-# CGO_ENABLED=0 is important for creating a static binary for Alpine.
-# -ldflags "-s -w" strips debug symbols to make the binary smaller.
-RUN CGO_ENABLED=0 GOOS=linux go build -a -ldflags "-s -w" -o /app/main .
-
-# --- Final Stage ---
-# Use a minimal Alpine image for the final container.
-FROM alpine:latest
-
-# Set the working directory.
-WORKDIR /root/
-
-# Copy the built binary from the builder stage.
-COPY --from=builder /app/main .
-
-# (Optional) Copy any config files if needed.
-# COPY config.yml .
-
-# Command to run the application.
-CMD ["./main"]
-```
-
-You will place a copy of this `Dockerfile` into each of the five Go service directories, replacing `<service>` with the actual service name (e.g., `api`, `crawler`, `discovery`, `processor`, `scheduler`).
-
-### Part 3: Go Code Design & Project Structure
-
-We will use a **monorepo** approach. All your Go code will live in the `github-trending` directory. This is simpler to manage for a new project. We will leverage Go's module system.
-
-#### Step 1: Initialize Go Module
-
-In the root of your project, run:
-
-```bash
-go mod init github.com/your-username/github-trending
-```
-
-#### Step 2: High-Level Code Structure
-
-Your project layout will look like this:
+### Part 3: Project Structure
 
 ```
 github-trending/
@@ -375,41 +312,22 @@ github-trending/
 ├── go.sum
 ├── cmd/
 │   ├── api/
-│   │   ├── Dockerfile
-│   │   └── main.go
 │   ├── crawler/
-│   │   ├── Dockerfile
-│   │   └── main.go
 │   ├── discovery/
-│   │   ├── Dockerfile
-│   │   └── main.go
+│   ├── embedding-api-service/
+│   ├── embedding-autoscaler/
 │   ├── embedding-service/
-│   │   ├── Dockerfile
-│   │   └── main.go
 │   ├── processor/
-│   │   ├── Dockerfile
-│   │   └── main.go
 │   ├── scheduler/
-│   │   ├── Dockerfile
-│   │   └── main.go
-│   └── similarity-engine-service/
-│       ├── Dockerfile
-│       └── main.go
+│   ├── similarity-engine-service/
+│   └── writer-service/
 ├── internal/
-│   ├── config/          # Load config from ENV vars
-│   │   └── config.go
+│   ├── api/
+│   ├── config/
 │   ├── database/
-│   │   ├── clickhouse.go
-│   │   ├── qdrant.go
-│   │   ├── minio.go
-│   │   ├── postgres.go
-│   │   └── redis.go
-│   ├── github/          # Your GitHub API client wrapper
-│   │   └── client.go
-│   ├── messaging/       # RabbitMQ logic
-│   │   └── rabbitmq.go
-│   └── models/          # Your core data structs
-│       └── repository.go
+│   ├── github/
+│   ├── messaging/
+│   └── models/
 └── storage/
     ├── postgres/
     │   └── schema.sql
@@ -417,264 +335,139 @@ github-trending/
         └── schema.sql
 ```
 
-**Explanation:**
+### Part 4: Database Schemas
 
-*   **`cmd/`**: This is the standard Go layout for applications. Each subdirectory is a self-contained microservice with its own `main.go` entrypoint.
-*   **`internal/`**: This is for shared code that is *internal* to your project. Go's tooling prevents other projects from importing packages from an `internal` directory. This is perfect for our shared database clients, models, and messaging logic.
-    *   **`config`**: A package to read configuration (like `RABBITMQ_URL`) from environment variables.
-    *   **`database`**: Contains functions to connect to and query PostgreSQL, ClickHouse, Redis, MinIO, and Qdrant.
-    *   **`github`**: You should build your own small wrapper around the GitHub API client. This lets you centralize rate limiting logic, error handling, and authentication.
-    *   **`messaging`**: Functions to connect to RabbitMQ, publish messages to a queue, and consume messages from a queue.
-    *   **`models`**: The definition of your core data types (e.g., `RepositoryStats`, `RepositoryMeta`).
-*   **`storage/`**: Contains the database schema files.
+**PostgreSQL (`storage/postgres/schema.sql`):**
 
-#### Step 3: Example Code Stub (`api-server/main.go`)
+```sql
+CREATE TABLE IF NOT EXISTS owners (
+    id BIGINT PRIMARY KEY,
+    login VARCHAR(255) UNIQUE NOT NULL,
+    avatar_url VARCHAR(255),
+    html_url VARCHAR(255),
+    type VARCHAR(255)
+);
 
-Let's write a skeleton for the `api-server` to show how it all connects.
+CREATE TABLE IF NOT EXISTS licenses (
+    key VARCHAR(255) PRIMARY KEY,
+    name VARCHAR(255),
+    spdx_id VARCHAR(255),
+    url VARCHAR(255),
+    node_id VARCHAR(255)
+);
 
-```go
-// github-trending/cmd/api/main.go
-package main
+CREATE TABLE IF NOT EXISTS repositories (
+    id BIGINT PRIMARY KEY,
+    node_id VARCHAR(255),
+    name VARCHAR(255) NOT NULL,
+    full_name VARCHAR(255) UNIQUE NOT NULL,
+    owner_id BIGINT REFERENCES owners(id),
+    description TEXT,
+    html_url VARCHAR(255),
+    homepage VARCHAR(255),
+    default_branch VARCHAR(255),
+    license_key VARCHAR(255) REFERENCES licenses(key),
+    readme_url VARCHAR(255),
+    created_at TIMESTAMP WITH TIME ZONE,
+    is_fork BOOLEAN,
+    is_template BOOLEAN,
+    is_archived BOOLEAN,
+    is_disabled BOOLEAN,
+    last_crawled_at TIMESTAMP WITH TIME ZONE
+);
 
-import (
-	"log"
+CREATE TABLE IF NOT EXISTS languages (
+    id SERIAL PRIMARY KEY,
+    name VARCHAR(255) UNIQUE NOT NULL
+);
 
-	"github.com/teomiscia/github-trending/internal/api"
-	"github.com/teomiscia/github-trending/internal/config"
-	"github.com/teomiscia/github-trending/internal/database"
-)
+CREATE TABLE IF NOT EXISTS repository_languages (
+    repository_id BIGINT REFERENCES repositories(id) ON DELETE CASCADE,
+    language_id INT REFERENCES languages(id) ON DELETE CASCADE,
+    size BIGINT NOT NULL,
+    PRIMARY KEY (repository_id, language_id)
+);
 
-func main() {
-	// 1. Load Configuration
-	cfg, err := config.Load()
-	if err != nil {
-		log.Fatalf("Failed to load configuration: %v", err)
-	}
+CREATE TABLE IF NOT EXISTS tags (
+    id SERIAL PRIMARY KEY,
+    name VARCHAR(255) UNIQUE NOT NULL
+);
 
-	// 2. Connect to Redis
-	redisClient, err := database.NewRedisClient(cfg.RedisHost, cfg.RedisPort, cfg.RedisPassword)
-	if err != nil {
-		log.Fatalf("Failed to connect to Redis: %v", err)
-	}
+CREATE TABLE IF NOT EXISTS repository_tags (
+    repository_id BIGINT REFERENCES repositories(id) ON DELETE CASCADE,
+    tag_id INT REFERENCES tags(id) ON DELETE CASCADE,
+    PRIMARY KEY (repository_id, tag_id)
+);
 
-	// 3. Connect to PostgreSQL
-	postgresConnection, err := database.NewPostgresConnection(cfg.PostgresHost, "5432", cfg.PostgresUser, cfg.PostgresPassword, cfg.PostgresDB)
-	if err != nil {
-		log.Fatalf("Failed to connect to Postgres: %v", err)
-	}
+CREATE TABLE IF NOT EXISTS topics (
+    id SERIAL PRIMARY KEY,
+    name VARCHAR(255) UNIQUE NOT NULL
+);
 
-	// 4. Create and start the API server
-	server := api.NewServer(redisClient, postgresConnection)
+CREATE TABLE IF NOT EXISTS repository_topics (
+    repository_id BIGINT REFERENCES repositories(id) ON DELETE CASCADE,
+    topic_id INT REFERENCES topics(id) ON DELETE CASCADE,
+    PRIMARY KEY (repository_id, topic_id)
+);
 
-	log.Println("API Server started. Listening on :8080")
-	log.Fatal(server.Run(":8080"))
-}
+CREATE TABLE IF NOT EXISTS repository_views (
+    id SERIAL PRIMARY KEY,
+    session_id VARCHAR(255) NOT NULL,
+    repository_id BIGINT NOT NULL,
+    viewed_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS repository_similarity (
+    id BIGINT PRIMARY KEY,
+    data JSONB NOT NULL
+);
 ```
 
-#### Step 4: Example Code Stub (`internal/api/api.go`)
+**ClickHouse (`storage/clickhouse/schema.sql`):**
+
+```sql
+CREATE TABLE IF NOT EXISTS repository_stats (
+    event_date Date,
+    event_time DateTime,
+    repository_id UInt64,
+    stargazers_count UInt64,
+    watchers_count UInt64,
+    forks_count UInt64,
+    open_issues_count UInt64,
+    pushed_at DateTime,
+    score Float64
+)
+ENGINE = MergeTree
+PARTITION BY toYYYYMM(event_date)
+ORDER BY (repository_id, event_time);
+```
+
+### Part 5: Key Code Snippets
+
+**Autoscaler (`cmd/embedding-autoscaler/main.go`):**
 
 ```go
-package api
+package main
 
 import (
 	"context"
 	"fmt"
 	"log"
 	"net/http"
-	"sort"
+	"net/http/httputil"
+	"net/url"
+	"os"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
-	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
-	"github.com/redis/go-redis/v9"
-	"github.com/teomiscia/github-trending/internal/database"
+	"github.com/docker/docker/api/types"
+	"github.com/docker/docker/api/types/filters"
+	"github.com/docker/docker/api/types/swarm"
+	"github.com/docker/docker/client"
+	"github.com/joho/godotenv"
 )
 
-func NewServer(redisClient *redis.Client, db *database.PostgresConnection) *gin.Engine {
-	router := gin.Default()
-
-	router.GET("/retrieveList", handleRetrieveList(redisClient, db))
-	router.POST("/trackOpenRepository", handleTrackOpenRepository(db))
-
-	return router
-}
-
-func handleRetrieveList(redisClient *redis.Client, db *database.PostgresConnection) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		sessionID := c.Query("sessionId")
-		if sessionID == "" {
-			sessionID = uuid.New().String()
-		}
-
-		languages := strings.Split(c.Query("languages"), ",")
-		if len(languages) == 1 && languages[0] == "" {
-			languages = []string{}
-		}
-		tags := strings.Split(c.Query("tags"), ",")
-		if len(tags) == 1 && tags[0] == "" {
-			tags = []string{}
-		}
-
-		var recommendedRepoIDs []int64
-
-		// 1. Query the repository_views table for user history
-		userHistoryRepoIDs, err := db.GetRecentClickedRepositoryIDs(sessionID, 15) // Get last 15 clicked repos
-		if err != nil {
-			log.Printf("Failed to get user history from Postgres: %v", err)
-			// Fallback to generic trending if history fails
-			repoIDs, err := db.GetTrendingRepositoryIDs(languages, tags)
-			if err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve repository list"})
-				return
-			}
-			recommendedRepoIDs = repoIDs
-		} else if len(userHistoryRepoIDs) == 0 {
-			// 2. If no user history exists, fall back to generic trending
-			repoIDs, err := db.GetTrendingRepositoryIDs(languages, tags)
-			if err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve repository list"})
-				return
-			}
-			recommendedRepoIDs = repoIDs
-		} else {
-			// 3. If user history exists, aggregate similar repositories
-			candidateScores := make(map[int64]float64)
-			for _, historyRepoID := range userHistoryRepoIDs {
-				redisKey := fmt.Sprintf("similar:%d", historyRepoID)
-				// Fetch top 50 similar repos for each history item
-				similarRepos, err := redisClient.ZRevRangeWithScores(context.Background(), redisKey, 0, 49).Result()
-				if err != nil {
-					log.Printf("Failed to get similar repos from Redis for %d: %v", historyRepoID, err)
-					continue
-				}
-				for _, z := range similarRepos {
-					repoID, _ := strconv.ParseInt(fmt.Sprintf("%.0f", z.Member), 10, 64)
-					candidateScores[repoID] += z.Score
-				}
-			}
-
-			// Convert map to slice for sorting
-			type scoredRepo struct {
-				ID    int64
-				Score float64
-			}
-			var scoredRepos []scoredRepo
-			for id, score := range candidateScores {
-				scoredRepos = append(scoredRepos, scoredRepo{ID: id, Score: score})
-			}
-
-			// Sort by score in descending order
-			sort.Slice(scoredRepos, func(i, j int) bool {
-				return scoredRepos[i].Score > scoredRepos[j].Score
-			})
-
-			for _, sr := range scoredRepos {
-				recommendedRepoIDs = append(recommendedRepoIDs, sr.ID)
-			}
-		}
-
-		// Filter out repositories that have already been seen in this session
-		seenRepoIDs, err := redisClient.SMembers(context.Background(), sessionID).Result()
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve seen repositories"})
-			return
-		}
-
-		seenRepoIDMap := make(map[int64]bool)
-		for _, idStr := range seenRepoIDs {
-			id, _ := strconv.ParseInt(idStr, 10, 64)
-			seenRepoIDMap[id] = true
-		}
-
-		var finalRepoIDs []int64
-		for _, id := range recommendedRepoIDs {
-			if !seenRepoIDMap[id] {
-				finalRepoIDs = append(finalRepoIDs, id)
-			}
-		}
-
-		// Paginate the results
-		page := 0
-		if pageStr := c.Query("page"); pageStr != "" {
-			page, _ = strconv.Atoi(pageStr)
-		}
-		pageSize := 50
-		start := page * pageSize
-		end := start + pageSize
-		if start > len(finalRepoIDs) {
-			finalRepoIDs = []int64{}
-		} else if end > len(finalRepoIDs) {
-			finalRepoIDs = finalRepoIDs[start:]
-		} else {
-			finalRepoIDs = finalRepoIDs[start:end]
-		}
-
-		// Add the new repositories to the seen set in Redis
-		if len(finalRepoIDs) > 0 {
-			var repoIDStrs []string
-			for _, id := range finalRepoIDs {
-				repoIDStrs = append(repoIDStrs, fmt.Sprint(id))
-			}
-			redisClient.SAdd(context.Background(), sessionID, repoIDStrs)
-		}
-
-		c.JSON(http.StatusOK, gin.H{
-			"sessionId":    sessionID,
-			"repositories": finalRepoIDs,
-		})
-	}
-}
-
-func handleTrackOpenRepository(db *database.PostgresConnection) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		var requestBody struct {
-			SessionID    string `json:"sessionId"`
-			RepositoryID int64  `json:"repositoryId"`
-		}
-
-		if err := c.BindJSON(&requestBody); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
-			return
-		}
-
-		if err := db.TrackRepositoryView(requestBody.SessionID, requestBody.RepositoryID); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to track repository view"})
-			return
-		}
-
-		c.JSON(http.StatusOK, gin.H{"status": "success"})
-	}
-}
-
-
-### Your First Steps: Putting It All Together
-
-1.  **Create the Full Directory Structure:** Use the `mkdir` commands from above.
-2.  **Create the `.env` File:** Populate it with your environment variables.
-3.  **Create the Go Module:** Run `go mod init ...`.
-4.  **Create the `Dockerfile`s:** Create the generic `Dockerfile` and place a copy in each of the five `cmd/*` directories. (e.g., in `cmd/crawler/Dockerfile`).
-5.  **Write Skeletons:** Write a basic `main.go` for each service, just to prove they can start up. For now, they can just print a message like `"Crawler service starting..."`.
-6.  **Launch!** From the root `github-trending` directory, run:
-
-    ```bash
-    docker-compose up --build
-    ```
-
-You will see Docker build each of your Go services and then start all the containers. You can visit `http://localhost:15672` (user: `guest`, pass: `guest`) to see the RabbitMQ management UI, `http://localhost:9001` for MinIO, and connect to the databases on their respective ports.
-
-This setup gives you a complete, professional foundation. You can now focus on writing the Go logic inside each microservice, knowing that the infrastructure and communication layer is already handled.
-
-### Summary of Changes (2025-07-09)
-
-*   **Replaced Milvus with Qdrant:** The vector database has been changed from Milvus to Qdrant for storing README embeddings.
-*   **Added `similarity-engine-service`:** This service calculates and stores similarity scores between repositories.
-*   **Enhanced API Server:** The API server now provides personalized recommendations based on user history and uses Redis for caching.
-*   **Improved Discovery Service:** The discovery service now uses a lock file to resume discovery and a trigger file to start discovery immediately.
-*   **Improved Crawler Service:** The crawler service now checks if a repository has been updated before crawling it.
-*   **Refactored Processor Service:** The processor service has been refactored into its own package.
-*   **Updated Configuration Handling:** The configuration loading logic now correctly parses custom duration units for "months" and "years".
-*   **Updated Data Models:** The data models have been updated to include more fields and new message structs have been added.
-*   **Improved GitHub Client:** The GitHub client now includes a backoff mechanism to handle rate limiting.
-*   **Fixed `similarity-engine-service`:** The `similarity-engine-service` now correctly retrieves embeddings from Qdrant, resolving a critical bug that prevented it from functioning.
-*   **Improved `embedding-service`:** The `embedding-service` now correctly handles cases where a README cannot be fetched, preventing poison-pill messages from clogging the queue.
+// ... (full source code of autoscaler) ...
+```

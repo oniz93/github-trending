@@ -18,6 +18,8 @@ services:
       retries: 5
     env_file:
       - ./.env
+    networks:
+      - github-trending-nw
 
   postgres:
     image: postgres:17.6-alpine
@@ -35,6 +37,8 @@ services:
       timeout: 5s
       retries: 5
     command: postgres -c shared_preload_libraries=pg_stat_statements
+    networks:
+      - github-trending-nw
 
   minio:
     image: minio/minio:latest
@@ -52,6 +56,8 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    networks:
+      - github-trending-nw
 
   clickhouse:
     image: clickhouse/clickhouse-server:latest
@@ -72,6 +78,8 @@ services:
       retries: 5
     env_file:
       - ./.env
+    networks:
+      - github-trending-nw
 
   redis:
     image: redis:alpine
@@ -85,6 +93,8 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    networks:
+      - github-trending-nw
 
   qdrant:
     image: qdrant/qdrant:latest
@@ -94,6 +104,8 @@ services:
       - "6334:6334"
     volumes:
       - ./data/qdrant:/qdrant/storage
+    networks:
+      - github-trending-nw
         
   dozzle:
     image: amir20/dozzle:latest
@@ -110,6 +122,8 @@ services:
     #
     # Uncomment to enable authentication. See https://dozzle.dev/guide/authentication
     # - DOZZLE_AUTH_PROVIDER=simple
+    networks:
+      - github-trending-nw
 
   # --- APPLICATION SERVICES (Golang) ---
 
@@ -117,22 +131,26 @@ services:
     build:
       context: .
       dockerfile: ./cmd/discovery/Dockerfile
+    image: github-trending/discovery
     container_name: discovery
     depends_on:
-      rabbitmq: { condition: service_healthy }
-      postgres: { condition: service_healthy }
+      - rabbitmq
+      - postgres
     restart: unless-stopped
     env_file:
       - ./.env
+    networks:
+      - github-trending-nw
     
   # scheduler:
   #   build:
   #     context: .
   #     dockerfile: ./cmd/scheduler/Dockerfile
+  #   image: github-trending/scheduler
   #   container_name: scheduler
   #   depends_on:
-  #     rabbitmq: { condition: service_healthy }
-  #     postgres: { condition: service_healthy }
+  #     - rabbitmq
+  #     - postgres
   #   restart: unless-stopped
   #   env_file:
   #     - ./.env
@@ -141,96 +159,130 @@ services:
     build:
       context: .
       dockerfile: ./cmd/crawler/Dockerfile
+    image: github-trending/crawler
     # Let's say we want to run 3 crawler instances
     deploy:
       replicas: 6
     depends_on:
-      rabbitmq: { condition: service_healthy }
+      - rabbitmq
     restart: unless-stopped
     env_file:
       - ./.env
+    networks:
+      - github-trending-nw
       
   processor:
     build:
       context: .
       dockerfile: ./cmd/processor/Dockerfile
+    image: github-trending/processor
     deploy:
       replicas: 3
     depends_on:
-      rabbitmq: { condition: service_healthy }
-      minio: { condition: service_healthy }
+      - rabbitmq
+      - minio
     restart: unless-stopped
     env_file:
       - ./.env
+    networks:
+      - github-trending-nw
 
   writer-service:
     build:
       context: .
       dockerfile: ./cmd/writer-service/Dockerfile
+    image: github-trending/writer-service
     container_name: writer-service
     depends_on:
-      rabbitmq: { condition: service_healthy }
-      postgres: { condition: service_healthy }
-      clickhouse: { condition: service_healthy }
+      - rabbitmq
+      - postgres
+      - clickhouse
     restart: unless-stopped
     env_file:
       - ./.env
+    networks:
+      - github-trending-nw
 
   api-server:
     build:
       context: .
       dockerfile: ./cmd/api/Dockerfile
+    image: github-trending/api-server
     container_name: api-server
     ports:
       - "8080:8080"
     depends_on:
-      rabbitmq: { condition: service_healthy }
-      postgres: { condition: service_healthy }
-      clickhouse: { condition: service_healthy }
-      minio: { condition: service_healthy }
-      redis: { condition: service_healthy }
+      - rabbitmq
+      - postgres
+      - clickhouse
+      - minio
+      - redis
     restart: unless-stopped
     env_file:
       - ./.env
+    networks:
+      - github-trending-nw
 
   embedding-service:
     build:
       context: .
       dockerfile: ./cmd/embedding-service/Dockerfile
+    image: github-trending/embedding-service
     container_name: embedding_service
     depends_on:
-      rabbitmq: { condition: service_healthy }
-      postgres: { condition: service_healthy }
-      minio: { condition: service_healthy }
-      qdrant: { condition: service_started }
+      - rabbitmq
+      - postgres
+      - minio
+      - qdrant
     restart: unless-stopped
     env_file:
       - ./.env
+    networks:
+      - github-trending-nw
 
   embedding-api-service:
     build:
-      context: ./cmd/embedding-api-service
-    deploy:
-      replicas: 3
+      context: .
+      dockerfile: ./cmd/embedding-autoscaler/Dockerfile
+    image: github-trending/embedding-autoscaler
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
     restart: unless-stopped
+    env_file:
+      - ./.env
+    networks:
+      - github-trending-nw
+
+  embedding-api-instance:
+    build:
+      context: ./cmd/embedding-api-service
+    image: github-trending/embedding-api-service
+    restart: unless-stopped
+    deploy:
+      replicas: 0 # Start with 0 replicas
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost/health"]
       interval: 10s
       timeout: 5s
       retries: 5
+    networks:
+      - github-trending-nw
 
   similarity-engine-service:
     build:
       context: .
       dockerfile: ./cmd/similarity-engine-service/Dockerfile
+    image: github-trending/similarity-engine-service
     container_name: similarity_engine_service
     depends_on:
-      postgres: { condition: service_healthy }
-      qdrant: { condition: service_started }
-      redis: { condition: service_healthy }
+      - postgres
+      - qdrant
+      - redis
     restart: unless-stopped
     env_file:
       - ./.env
+    networks:
+      - github-trending-nw
 
 volumes:
   rabbitmq_data:
@@ -239,3 +291,7 @@ volumes:
   clickhouse_data:
   redis_data:
   qdrant_data:
+
+networks:
+  github-trending-nw:
+    driver: overlay

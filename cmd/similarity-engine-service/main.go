@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	numWorkers = 10
+	numWorkers = 5
 	maxRetries = 5
 	retryDelay = 5 * time.Second
 )
@@ -71,7 +71,7 @@ func main() {
 
 	var qdrantConnection *database.QdrantConnection
 	for i := 0; i < 5; i++ {
-		qdrantConnection, err = database.NewQdrantConnection("qdrant_db", 6334)
+		qdrantConnection, err = database.NewQdrantConnection(cfg.QdrantHost, int(cfg.QdrantPort))
 		if err == nil {
 			break
 		}

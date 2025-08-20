@@ -22,6 +22,8 @@ import (
 const (
 	numWorkers = 20
 	queueName  = "readme_to_embed"
+	maxRetries = 5
+	retryDelay = 5 * time.Second
 )
 
 func main() {
@@ -30,9 +32,17 @@ func main() {
 		log.Fatalf("Failed to load configuration: %v", err)
 	}
 
-	mqConnection, err := messaging.NewConnection(cfg.RabbitMQURL)
+	var mqConnection messaging.MQConnection
+	for i := 0; i < maxRetries; i++ {
+		mqConnection, err = messaging.NewConnection(cfg.RabbitMQURL)
+		if err == nil {
+			break
+		}
+		log.Printf("Failed to connect to RabbitMQ: %v. Retrying in %v...", err, retryDelay)
+		time.Sleep(retryDelay)
+	}
 	if err != nil {
-		log.Fatalf("Failed to connect to RabbitMQ: %v", err)
+		log.Fatalf("Failed to connect to RabbitMQ after %d retries: %v", maxRetries, err)
 	}
 	defer mqConnection.Close()
 
@@ -42,14 +52,30 @@ func main() {
 	}
 	defer pgConnection.DB.Close()
 
-	minioConnection, err := database.NewMinioConnection(cfg.MinioEndpoint, cfg.MinioRootUser, cfg.MinioRootPassword)
+	var minioConnection *database.MinioConnection
+	for i := 0; i < maxRetries; i++ {
+		minioConnection, err = database.NewMinioConnection(cfg.MinioEndpoint, cfg.MinioRootUser, cfg.MinioRootPassword)
+		if err == nil {
+			break
+		}
+		log.Printf("Failed to connect to MinIO: %v. Retrying in %v...", err, retryDelay)
+		time.Sleep(retryDelay)
+	}
 	if err != nil {
-		log.Fatalf("Failed to connect to MinIO: %v", err)
+		log.Fatalf("Failed to connect to MinIO after %d retries: %v", maxRetries, err)
 	}
 
-	qdrantConnection, err := database.NewQdrantConnection("qdrant_db", 6334)
+	var qdrantConnection *database.QdrantConnection
+	for i := 0; i < maxRetries; i++ {
+		qdrantConnection, err = database.NewQdrantConnection(cfg.QdrantHost, cfg.QdrantPort)
+		if err == nil {
+			break
+		}
+		log.Printf("Failed to connect to Qdrant: %v. Retrying in %v...", err, retryDelay)
+		time.Sleep(retryDelay)
+	}
 	if err != nil {
-		log.Fatalf("Failed to connect to Qdrant: %v", err)
+		log.Fatalf("Failed to connect to Qdrant after %d retries: %v", maxRetries, err)
 	}
 	defer qdrantConnection.Close()
 
@@ -85,8 +111,7 @@ func main() {
 		}
 
 		// This channel will be closed when the connection is lost
-		notifyClose := make(chan *amqp.Error)
-		mqConnection.Connection.NotifyClose(notifyClose)
+		notifyClose := mqConnection.NotifyClose(make(chan *amqp.Error))
 
 		log.Println("Successfully connected to RabbitMQ. Consuming messages.")
 

@@ -10,26 +10,81 @@ The application is composed of the following microservices:
 *   **`scheduler-service`**: Schedules refreshes for repositories that are already being tracked.
 *   **`crawler-service`**: Fetches repository data from the GitHub API.
 *   **`processor-service`**: Processes and stores repository data in the appropriate databases.
+*   **`writer-service`**: Writes repository data to PostgreSQL and ClickHouse.
+*   **`embedding-api-service`**: A Python service that provides an API to generate text embeddings.
+*   **`embedding-autoscaler`**: A Go service that automatically scales the `embedding-api-service` based on load.
 *   **`embedding-service`**: Generates and stores semantic embeddings for repository READMEs.
 *   **`similarity-engine-service`**: Calculates and stores similarity scores between repositories.
 *   **`api-server`**: Provides a public API for accessing trending repository data.
 
 This design creates a robust, one-way data flow:
 
-`Discovery/Scheduler` -> `Crawl Queue` -> `Crawler` -> `Process Queue` -> `Processor` -> `Databases` <- `API Server`
-                                                                                                `Processor` -> `Embeddings Queue` -> `Embedding Service` -> `Qdrant`
-                                                                                                `Similarity Engine` -> `Qdrant` -> `Redis`
+`Discovery/Scheduler` -> `Crawl Queue` -> `Crawler` -> `Process Queue` -> `Processor` -> `Write Queue` -> `Writer Service` -> `Databases`
+                                                                                                  `Processor` -> `Embeddings Queue` -> `Embedding Service` -> `Embedding API` -> `Qdrant`
+                                                                                                  `Similarity Engine` -> `Qdrant` -> `Redis`
 
-## Getting Started
+## Deployment (Docker Swarm)
 
-To get started, you will need to have Docker and Docker Compose installed.
+This application is designed to be deployed as a Docker Swarm stack. This allows for easy scaling and management of the services.
 
-1.  Clone the repository.
-2.  Create a `.env` file in the root of the project and populate it with your environment variables. You can use the `.env.example` file as a template.
-3.  Run the following command to build and start the application:
+### Prerequisites
 
+- Docker Engine must be running in Swarm mode. If not, initialize it with:
+  ```bash
+  docker swarm init
+  ```
+
+### Initial Deployment
+
+1.  **Build all service images:**
     ```bash
-    docker-compose up --build -d
+    docker compose build
+    ```
+
+2.  **Deploy the stack:**
+    ```bash
+    docker stack deploy -c docker-compose.yml github-trending
+    ```
+
+### Development Workflow
+
+When you make changes to a service's code, follow these steps to update the running application:
+
+1.  **Rebuild the image for the service you changed:**
+    ```bash
+    # Rebuild a specific service (e.g., api-server)
+    docker compose build api-server
+
+    # Or, to rebuild all services
+    docker compose build
+    ```
+
+2.  **Update the running stack:**
+    This command will perform a rolling update for the services with new images.
+    ```bash
+    docker stack deploy -c docker-compose.yml github-trending
+    ```
+
+### Managing the Stack
+
+-   **List all services in the stack:**
+    ```bash
+    docker stack services github-trending
+    ```
+
+-   **View logs for a specific service:**
+    ```bash
+    docker service logs github-trending_api-server
+    ```
+
+-   **Restart a single service:**
+    ```bash
+    docker service update --force github-trending_api-server
+    ```
+
+-   **Remove the entire stack:**
+    ```bash
+    docker stack rm github-trending
     ```
 
 ## Project Structure
@@ -44,69 +99,25 @@ github-trending/
 ├── go.sum
 ├── cmd/
 │   ├── api/
-│   │   ├── Dockerfile
-│   │   └── main.go
 │   ├── crawler/
-│   │   ├── Dockerfile
-│   │   └── main.go
 │   ├── discovery/
-│   │   ├── Dockerfile
-│   │   └── main.go
+│   ├── embedding-api-service/
+│   ├── embedding-autoscaler/
 │   ├── embedding-service/
-│   │   ├── Dockerfile
-│   │   └── main.go
 │   ├── processor/
-│   │   ├── Dockerfile
-│   │   └── main.go
 │   ├── scheduler/
-│   │   ├── Dockerfile
-│   │   └── main.go
-│   └── similarity-engine-service/
-│       ├── Dockerfile
-│       └── main.go
+│   ├── similarity-engine-service/
+│   └── writer-service/
 ├── internal/
-│   ├── config/          # Load config from ENV vars
-│   │   └── config.go
+│   ├── api/
+│   ├── config/
 │   ├── database/
-│   │   ├── clickhouse.go
-│   │   ├── qdrant.go
-│   │   ├── minio.go
-│   │   ├── postgres.go
-│   │   └── redis.go
-│   ├── github/          # Your GitHub API client wrapper
-│   │   └── client.go
-│   ├── messaging/       # RabbitMQ logic
-│   │   └── rabbitmq.go
-│   └── models/          # Your core data structs
-│       └── repository.go
+│   ├── github/
+│   ├── messaging/
+│   └── models/
 └── storage/
     ├── postgres/
     │   └── schema.sql
     └── clickhouse/
         └── schema.sql
 ```
-
-**Explanation:**
-
-*   **`cmd/`**: This is the standard Go layout for applications. Each subdirectory is a self-contained microservice with its own `main.go` entrypoint.
-*   **`internal/`**: This is for shared code that is *internal* to your project. Go's tooling prevents other projects from importing packages from an `internal` directory. This is perfect for our shared database clients, models, and messaging logic.
-    *   **`config`**: A package to read configuration (like `RABBITMQ_URL`) from environment variables.
-    *   **`database`**: Contains functions to connect to and query PostgreSQL, ClickHouse, Redis, MinIO, and Qdrant.
-    *   **`github`**: You should build your own small wrapper around the GitHub API client. This lets you centralize rate limiting logic, error handling, and authentication.
-    *   **`messaging`**: Functions to connect to RabbitMQ, publish messages to a queue, and consume messages from a queue.
-    *   **`models`**: The definition of your core data types (e.g., `RepositoryStats`, `RepositoryMeta`).
-*   **`storage/`**: Contains the database schema files.
-
-## Summary of Changes (2025-07-09)
-
-*   **Replaced Milvus with Qdrant:** The vector database has been changed from Milvus to Qdrant for storing README embeddings.
-*   **Added `similarity-engine-service`:** This service calculates and stores similarity scores between repositories.
-*   **Enhanced API Server:** The API server now provides personalized recommendations based on user history and uses Redis for caching.
-*   **Improved Discovery Service:** The discovery service now uses a lock file to resume discovery and a trigger file to start discovery immediately.
-*   **Improved Crawler Service:** The crawler service now checks if a repository has been updated before crawling it.
-*   **Refactored Processor Service:** The processor service has been refactored into its own package.
-*   **Updated Configuration Handling:** The configuration loading logic now correctly parses custom duration units for "months" and "years".
-*   **Updated Data Models:** The data models have been updated to include more fields and new message structs have been added.
-*   **Improved GitHub Client:** The GitHub client now includes a backoff mechanism to handle rate limiting.
-*   **Fixed `similarity-engine-service`:** The `similarity-engine-service` now correctly retrieves embeddings from Qdrant, resolving a critical bug that prevented it from functioning.
-*   **Improved `embedding-service`:** The `embedding-service` now correctly handles cases where a README cannot be fetched, preventing poison-pill messages from clogging the queue.

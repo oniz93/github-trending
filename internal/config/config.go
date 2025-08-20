@@ -10,29 +10,31 @@ import (
 
 // Config holds application configuration.
 type Config struct {
-	RabbitMQURL        string
-	RabbitMQUser       string
-	RabbitMQPassword   string
-	GitHubToken        string
-	PostgresHost       string
-	PostgresUser       string
-	PostgresPassword   string
-	PostgresDB         string
-	MinioEndpoint      string
-	MinioRootUser      string
-	MinioRootPassword  string
-	ClickHouseHost     string
-	ClickHousePort     string
-	ClickHouseUser     string
-	ClickHousePassword string
-	ClickHouseDB       string
-	RedisHost          string
-	RedisPort          string
-	RedisPassword      string
-	MilvusHost         string
-	MilvusPort         string
-	LastUpdateCut      time.Duration
-	SimilarityListSize int
+	RabbitMQURL             string
+	RabbitMQUser            string
+	RabbitMQPassword        string
+	GitHubToken             string
+	PostgresHost            string
+	PostgresUser            string
+	PostgresPassword        string
+	PostgresDB              string
+	MinioEndpoint           string
+	MinioRootUser           string
+	MinioRootPassword       string
+	ClickHouseHost          string
+	ClickHousePort          string
+	ClickHouseUser          string
+	ClickHousePassword      string
+	ClickHouseDB            string
+	RedisHost               string
+	RedisPort               string
+	RedisPassword           string
+	QdrantHost              string
+	QdrantPort              int
+	LastUpdateCut           time.Duration
+	SimilarityListSize      int
+	EmbeddingApiMaxInstances int
+	EmbeddingApiIdleTimeout int
 }
 
 // ParseDuration parses a duration string with support for "months".
@@ -70,30 +72,50 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("invalid SIMILARITY_LIST_SIZE: %w", err)
 	}
 
+	qdrantPortStr := os.Getenv("QDRANT_PORT")
+	qdrantPort, err := strconv.Atoi(qdrantPortStr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid QDRANT_PORT: %w", err)
+	}
+
+	embeddingApiMaxInstancesStr := os.Getenv("EMBEDDING_API_MAX_INSTANCES")
+	embeddingApiMaxInstances, err := strconv.Atoi(embeddingApiMaxInstancesStr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid EMBEDDING_API_MAX_INSTANCES: %w", err)
+	}
+
+	embeddingApiIdleTimeoutStr := os.Getenv("EMBEDDING_API_IDLE_TIMEOUT")
+	embeddingApiIdleTimeout, err := strconv.Atoi(embeddingApiIdleTimeoutStr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid EMBEDDING_API_IDLE_TIMEOUT: %w", err)
+	}
+
 	config := &Config{
-		RabbitMQURL:        os.Getenv("RABBITMQ_URL"),
-		RabbitMQUser:       os.Getenv("RABBITMQ_DEFAULT_USER"),
-		RabbitMQPassword:   os.Getenv("RABBITMQ_DEFAULT_PASS"),
-		GitHubToken:        os.Getenv("GITHUB_TOKEN"),
-		PostgresHost:       os.Getenv("POSTGRES_HOST"),
-		PostgresUser:       os.Getenv("POSTGRES_USER"),
-		PostgresPassword:   os.Getenv("POSTGRES_PASSWORD"),
-		PostgresDB:         os.Getenv("POSTGRES_DB"),
-		MinioEndpoint:      os.Getenv("MINIO_ENDPOINT"),
-		MinioRootUser:      os.Getenv("MINIO_ROOT_USER"),
-		MinioRootPassword:  os.Getenv("MINIO_ROOT_PASSWORD"),
-		ClickHouseHost:     os.Getenv("CLICKHOUSE_HOST"),
-		ClickHousePort:     os.Getenv("CLICKHOUSE_PORT"),
-		ClickHouseUser:     os.Getenv("CLICKHOUSE_USER"),
-		ClickHousePassword: os.Getenv("CLICKHOUSE_PASSWORD"),
-		ClickHouseDB:       os.Getenv("CLICKHOUSE_DB"),
-		RedisHost:          os.Getenv("REDIS_HOST"),
-		RedisPort:          os.Getenv("REDIS_PORT"),
-		RedisPassword:      os.Getenv("REDIS_PASSWORD"),
-		MilvusHost:         os.Getenv("MILVUS_HOST"),
-		MilvusPort:         os.Getenv("MILVUS_PORT"),
-		LastUpdateCut:      lastUpdateCut,
-		SimilarityListSize: similarityListSize,
+		RabbitMQURL:             os.Getenv("RABBITMQ_URL"),
+		RabbitMQUser:            os.Getenv("RABBITMQ_DEFAULT_USER"),
+		RabbitMQPassword:        os.Getenv("RABBITMQ_DEFAULT_PASS"),
+		GitHubToken:             os.Getenv("GITHUB_TOKEN"),
+		PostgresHost:            os.Getenv("POSTGRES_HOST"),
+		PostgresUser:            os.Getenv("POSTGRES_USER"),
+		PostgresPassword:        os.Getenv("POSTGRES_PASSWORD"),
+		PostgresDB:              os.Getenv("POSTGRES_DB"),
+		MinioEndpoint:           os.Getenv("MINIO_ENDPOINT"),
+		MinioRootUser:           os.Getenv("MINIO_ROOT_USER"),
+		MinioRootPassword:       os.Getenv("MINIO_ROOT_PASSWORD"),
+		ClickHouseHost:          os.Getenv("CLICKHOUSE_HOST"),
+		ClickHousePort:          os.Getenv("CLICKHOUSE_PORT"),
+		ClickHouseUser:          os.Getenv("CLICKHOUSE_USER"),
+		ClickHousePassword:      os.Getenv("CLICKHOUSE_PASSWORD"),
+		ClickHouseDB:            os.Getenv("CLICKHOUSE_DB"),
+		RedisHost:               os.Getenv("REDIS_HOST"),
+		RedisPort:               os.Getenv("REDIS_PORT"),
+		RedisPassword:           os.Getenv("REDIS_PASSWORD"),
+		QdrantHost:              os.Getenv("QDRANT_HOST"),
+		QdrantPort:              qdrantPort,
+		LastUpdateCut:           lastUpdateCut,
+		SimilarityListSize:      similarityListSize,
+		EmbeddingApiMaxInstances: embeddingApiMaxInstances,
+		EmbeddingApiIdleTimeout: embeddingApiIdleTimeout,
 	}
 
 	if os.Getenv("LOCAL_ENV") == "true" {

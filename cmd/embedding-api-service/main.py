@@ -1,6 +1,7 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from sentence_transformers import SentenceTransformer
+import gc
 
 app = FastAPI()
 
@@ -23,3 +24,6 @@ def create_embedding(request: EmbedRequest):
         return {"embedding": embedding}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        # Explicitly trigger garbage collection to free up memory.
+        gc.collect()
