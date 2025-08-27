@@ -16,6 +16,7 @@ The system is a microservices-based application designed to discover, analyze, a
 *   **`embedding-service` (Go):** Consumes from the `readme_to_embed` queue. It fetches the README content from MinIO, calls the `embedding-api-service` (via the autoscaler) to get the embedding, and stores the resulting vector in the Qdrant vector database.
 *   **`similarity-engine-service` (Go):** Periodically calculates similarity scores between repositories. It fetches embeddings from Qdrant, computes similarity, and stores the results in Redis for fast access.
 *   **`api-server` (Go):** The public-facing API for the application. It handles user requests, queries the databases (PostgreSQL, ClickHouse, Redis) to get trending and personalized repository data, and returns the results as JSON.
+*   **`web` (React Native/Expo):** A mobile and web application that provides a user interface for browsing trending repositories. It features a TikTok-style vertical scrolling feed and a detailed view with a rendered README.
 
 **Data Flow:**
 
@@ -28,7 +29,7 @@ The system is a microservices-based application designed to discover, analyze, a
 7.  `Processor` -> `readme_to_embed` (RabbitMQ)
 8.  `readme_to_embed` -> `Embedding Service` -> `MinIO` & `Embedding API` -> `Qdrant`
 9.  `Similarity Engine` -> `Qdrant` & `PostgreSQL` -> `Redis`
-10. `API Server` -> `PostgreSQL`, `ClickHouse`, `Redis` -> User
+10. `API Server` -> `PostgreSQL`, `ClickHouse`, `Redis` -> `web` (User)
 
 ### Part 2: Local Development & Deployment (Docker Swarm)
 
@@ -310,6 +311,11 @@ github-trending/
 ├── docker-compose.yml
 ├── go.mod
 ├── go.sum
+├── web/
+│   ├── app/
+│   ├── components/
+│   ├── services/
+│   └── ...
 ├── cmd/
 │   ├── api/
 │   ├── crawler/
@@ -442,7 +448,58 @@ PARTITION BY toYYYYMM(event_date)
 ORDER BY (repository_id, event_time);
 ```
 
-### Part 5: Key Code Snippets
+### Part 5: Frontend (React Native / Expo)
+
+**Technology Stack:**
+
+*   **Framework:** React Native with Expo
+*   **Language:** TypeScript
+*   **Navigation:** React Navigation
+*   **Gestures:** React Native Gesture Handler, React Native Reanimated
+*   **API Client:** Axios
+*   **Web Rendering:** React Native WebView (for native), iframe (for web)
+
+**Project Structure (`web/` directory):
+
+```
+web/
+├── app/              # Screens and navigation
+│   ├── _layout.tsx
+│   └── index.tsx
+├── components/       # Reusable components
+│   ├── RepositoryCard.tsx
+│   └── TopBar.tsx
+├── services/         # API services
+│   └── api.ts
+├── types/            # TypeScript types
+│   └── repository.ts
+├── hooks/
+└── assets/
+```
+
+**Development Workflow:**
+
+1.  **Navigate to the `web` directory:**
+    ```bash
+    cd web
+    ```
+2.  **Install dependencies:**
+    ```bash
+    npm install
+    ```
+3.  **Start the development server:**
+    ```bash
+    # For web
+    npm run web
+
+    # For iOS
+    npm run ios
+
+    # For Android
+    npm run android
+    ```
+
+### Part 6: Key Code Snippets
 
 **Autoscaler (`cmd/embedding-autoscaler/main.go`):**
 

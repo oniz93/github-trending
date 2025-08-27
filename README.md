@@ -1,6 +1,6 @@
 # GitHub Trending
 
-This project is a microservices-based application that discovers, analyzes, and displays trending repositories on GitHub.
+This project is a microservices-based application that discovers, analyzes, and displays trending repositories on GitHub. It includes a backend built with Go and a frontend mobile and web application built with React Native and Expo.
 
 ## Architecture
 
@@ -16,12 +16,15 @@ The application is composed of the following microservices:
 *   **`embedding-service`**: Generates and stores semantic embeddings for repository READMEs.
 *   **`similarity-engine-service`**: Calculates and stores similarity scores between repositories.
 *   **`api-server`**: Provides a public API for accessing trending repository data.
+*   **`web`**: A React Native application (iOS, Android, and Web) that provides a user interface for browsing trending repositories.
 
-This design creates a robust, one-way data flow:
+This design creates a robust, one-way data flow for the backend:
 
 `Discovery/Scheduler` -> `Crawl Queue` -> `Crawler` -> `Process Queue` -> `Processor` -> `Write Queue` -> `Writer Service` -> `Databases`
                                                                                                   `Processor` -> `Embeddings Queue` -> `Embedding Service` -> `Embedding API` -> `Qdrant`
                                                                                                   `Similarity Engine` -> `Qdrant` -> `Redis`
+
+The `web` application communicates with the `api-server` to fetch data.
 
 ## Deployment (Docker Swarm)
 
@@ -48,7 +51,9 @@ This application is designed to be deployed as a Docker Swarm stack. This allows
 
 ### Development Workflow
 
-When you make changes to a service's code, follow these steps to update the running application:
+#### Backend
+
+When you make changes to a backend service's code, follow these steps to update the running application:
 
 1.  **Rebuild the image for the service you changed:**
     ```bash
@@ -63,6 +68,32 @@ When you make changes to a service's code, follow these steps to update the runn
     This command will perform a rolling update for the services with new images.
     ```bash
     docker stack deploy -c docker-compose.yml github-trending
+    ```
+
+#### Frontend (Web/Mobile)
+
+To run the frontend application for development:
+
+1.  **Navigate to the `web` directory:**
+    ```bash
+    cd web
+    ```
+
+2.  **Install dependencies:**
+    ```bash
+    npm install
+    ```
+
+3.  **Start the development server:**
+    ```bash
+    # For web
+    npm run web
+
+    # For iOS
+    npm run ios
+
+    # For Android
+    npm run android
     ```
 
 ### Managing the Stack
@@ -97,6 +128,11 @@ github-trending/
 ├── docker-compose.yml
 ├── go.mod
 ├── go.sum
+├── web/
+│   ├── app/
+│   ├── components/
+│   ├── services/
+│   └── ...
 ├── cmd/
 │   ├── api/
 │   ├── crawler/
