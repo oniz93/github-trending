@@ -1,8 +1,10 @@
 import React, { useEffect, useState } from 'react';
-import { View, Text, StyleSheet, Image, Dimensions, Platform } from 'react-native';
+import { View, Text, StyleSheet, Image, Dimensions, Platform, TouchableOpacity } from 'react-native';
+import { useRouter } from 'expo-router';
 import { Repository } from '../types/repository';
 import { fetchReadme } from '../services/api';
 import { WebView } from 'react-native-webview';
+import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 
 interface RepositoryCardProps {
   repository: Repository;
@@ -11,6 +13,7 @@ interface RepositoryCardProps {
 const { height } = Dimensions.get('window');
 
 const RepositoryCard: React.FC<RepositoryCardProps> = ({ repository }) => {
+  const router = useRouter();
   const [readme, setReadme] = useState('');
 
   useEffect(() => {
@@ -23,6 +26,12 @@ const RepositoryCard: React.FC<RepositoryCardProps> = ({ repository }) => {
 
     loadReadme();
   }, [repository.full_name]);
+
+  const fling = Gesture.Fling()
+    .direction(1)
+    .onEnd(() => {
+        router.push({ pathname: '/readme', params: { readmeUrl: repository.readme_url } });
+    });
 
   const renderReadme = () => {
     const styles = `
@@ -70,6 +79,7 @@ const RepositoryCard: React.FC<RepositoryCardProps> = ({ repository }) => {
   }
 
   return (
+    <GestureDetector gesture={fling}>
       <View style={styles.container}>
         <View style={styles.infoContainer}>
             <View style={styles.header}>
@@ -78,17 +88,27 @@ const RepositoryCard: React.FC<RepositoryCardProps> = ({ repository }) => {
             </View>
             <Text style={styles.title}>{repository.name}</Text>
             <Text style={styles.description}>{repository.description}</Text>
-            <View style={styles.footer}>
-              <View style={styles.statsContainer}>
-                <Text style={styles.statsText}>★ {repository.stargazers_count}</Text>
-                <Text style={styles.statsText}>● {repository.language}</Text>
-              </View>
-            </View>
         </View>
         <View style={styles.readmeContainer}>
           {renderReadme()}
         </View>
+        <View style={styles.footer}>
+            <TouchableOpacity onPress={() => router.push({ pathname: '/readme', params: { readmeUrl: repository.readme_url } })}>
+                <Text style={styles.showMore}>Show More</Text>
+            </TouchableOpacity>
+        </View>
+        <View style={styles.statsContainer}>
+            <View style={styles.stat}>
+                <Text style={styles.statIcon}>★</Text>
+                <Text style={styles.statText}>{repository.stargazers_count}</Text>
+            </View>
+            <View style={styles.stat}>
+                <Text style={styles.statIcon}>●</Text>
+                <Text style={styles.statText}>{repository.language}</Text>
+            </View>
+        </View>
       </View>
+    </GestureDetector>
   );
 };
 
@@ -98,10 +118,10 @@ const styles = StyleSheet.create({
     backgroundColor: '#0d1117',
     padding: 16,
     flex: 1,
-    flexDirection: 'column',
+    justifyContent: 'space-between',
   },
   infoContainer: {
-    // This will take up as much space as it needs
+    flex: 1,
   },
   header: {
     flexDirection: 'row',
@@ -117,6 +137,7 @@ const styles = StyleSheet.create({
   owner: {
     color: 'white',
     fontSize: 16,
+    fontFamily: 'monospace',
   },
   title: {
     color: 'white',
@@ -127,25 +148,42 @@ const styles = StyleSheet.create({
   description: {
     color: '#8b949e',
     fontSize: 16,
-    marginBottom: 16,
+    fontFamily: 'serif',
   },
   readmeContainer: {
-    flex: 1, // This will take up the remaining space
+    height: 300,
     overflow: 'hidden',
-    marginTop: 16,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#30363d',
   },
   footer: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
+    paddingVertical: 16,
     alignItems: 'center',
-    marginTop: 16,
+  },
+  showMore: {
+    color: '#58a6ff',
+    fontSize: 16,
   },
   statsContainer: {
-    flexDirection: 'row',
+    position: 'absolute',
+    right: 16,
+    top: '50%',
+    transform: [{ translateY: -50 }],
+    alignItems: 'center',
   },
-  statsText: {
+  stat: {
+    alignItems: 'center',
+    marginBottom: 16,
+  },
+  statIcon: {
+    fontSize: 24,
+    color: '#f0a500',
+  },
+  statText: {
     color: 'white',
-    marginRight: 16,
+    fontSize: 14,
+    fontFamily: 'monospace',
   },
 });
 
