@@ -27,23 +27,23 @@ const ReadmeScreen = () => {
 
   const renderReadme = () => {
     const styles = `
-      body { 
-        background-color: #0d1117; 
-        color: white; 
-        font-family: sans-serif; 
+      body {
+        background-color: #0d1117;
+        color: white;
+        font-family: sans-serif;
         margin: 0;
         padding: 16px;
       }
-      img { 
-        max-width: 100%; 
-        height: auto; 
+      img {
+        max-width: 100%;
+        height: auto;
         border-radius: 6px;
-      } 
+      }
       a { color: #58a6ff; }
-      pre { 
-        background-color: #161b22; 
-        padding: 16px; 
-        border-radius: 6px; 
+      pre {
+        background-color: #161b22;
+        padding: 16px;
+        border-radius: 6px;
         overflow: auto;
       }
       code {
@@ -54,7 +54,7 @@ const ReadmeScreen = () => {
     if (Platform.OS === 'web') {
       return (
         <iframe
-          srcDoc={`<style>${styles}</style>${readme}`}
+          srcDoc={`<style>${styles}</style><div class="markdown-body">${readme}</div>`}
           style={{ width: '100%', height: '100%', border: 'none' }}
         />
       );
@@ -62,7 +62,7 @@ const ReadmeScreen = () => {
       return (
         <WebView
             originWhitelist={['*']}
-            source={{ html: `<style>${styles}</style>${readme}` }}
+            source={{ html: `<style>${styles}</style><div class="markdown-body">${readme}</div>` }}
             style={styles.webview}
         />
       )
