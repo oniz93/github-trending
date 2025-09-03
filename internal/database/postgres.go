@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/golang/snappy"
-	_ "github.com/lib/pq"
+	"github.com/lib/pq"
 	"github.com/redis/go-redis/v9"
 	"github.com/teomiscia/github-trending/internal/models"
 )
@@ -676,7 +676,7 @@ func (pc *PostgresConnection) getRepositoriesDataByIDsFromDB(repoIDs []int64) ([
 			r.id = ANY($1)
 	`
 
-	rows, err := pc.DB.Query(query, repoIDs)
+	rows, err := pc.DB.Query(query, pq.Array(repoIDs))
 	if err != nil {
 		return nil, fmt.Errorf("failed to query repositories by IDs: %w", err)
 	}

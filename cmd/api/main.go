@@ -61,7 +61,7 @@ func main() {
 		log.Fatalf("Failed to connect to ClickHouse after %d retries: %v", maxRetries, err)
 	}
 
-	server := api.NewServer(redisClient, postgresConnection, clickhouseConnection)
+	server := api.NewServer(cfg, redisClient, postgresConnection, clickhouseConnection)
 
 	log.Println("API Server started. Listening on :8080")
 	log.Fatal(server.Run(":8080"))

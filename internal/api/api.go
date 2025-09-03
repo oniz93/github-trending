@@ -15,24 +15,34 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
+	"github.com/teomiscia/github-trending/internal/config"
 	"github.com/teomiscia/github-trending/internal/database"
+	"github.com/teomiscia/github-trending/internal/models"
 )
 
-func NewServer(redisClient *redis.Client, pgdb *database.PostgresConnection, chdb *database.ClickHouseConnection) *gin.Engine {
+func NewServer(cfg *config.Config, redisClient *redis.Client, pgdb *database.PostgresConnection, chdb *database.ClickHouseConnection) *gin.Engine {
 	router := gin.Default()
 
 	// Add CORS middleware
-	config := cors.DefaultConfig()
-	config.AllowAllOrigins = true
-	router.Use(cors.New(config))
+	corsConfig := cors.DefaultConfig()
+	corsConfig.AllowAllOrigins = true
+	router.Use(cors.New(corsConfig))
 
-	router.GET("/retrieveList", handleRetrieveList(redisClient, pgdb, chdb))
-	router.POST("/trackOpenRepository", handleTrackOpenRepository(redisClient, pgdb))
+	router.GET("/retrieveList", handleRetrieveList(cfg, redisClient, pgdb, chdb))
+	router.POST("/trackOpenRepository", handleTrackOpenRepository(cfg, redisClient, pgdb))
 
 	return router
 }
 
-func handleRetrieveList(redisClient *redis.Client, pgdb *database.PostgresConnection, chdb *database.ClickHouseConnection) gin.HandlerFunc {
+func errorResponse(c *gin.Context, code int, genericMessage string, err error, debug bool) {
+	response := gin.H{"error": genericMessage}
+	if debug && err != nil {
+		response["debug_error"] = err.Error()
+	}
+	c.JSON(code, response)
+}
+
+func handleRetrieveList(cfg *config.Config, redisClient *redis.Client, pgdb *database.PostgresConnection, chdb *database.ClickHouseConnection) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		sessionID := c.Query("sessionId")
 		if sessionID == "" {
@@ -62,7 +72,7 @@ func handleRetrieveList(redisClient *redis.Client, pgdb *database.PostgresConnec
 			// Fallback to generic trending if history fails
 			repoIDs, err := pgdb.GetTrendingRepositoryIDs(languages, tags, topics, []string{})
 			if err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve repository list"})
+				errorResponse(c, http.StatusInternalServerError, "Failed to retrieve repository list", err, cfg.Debug)
 				return
 			}
 			recommendedRepoIDs = repoIDs
@@ -71,7 +81,7 @@ func handleRetrieveList(redisClient *redis.Client, pgdb *database.PostgresConnec
 			seenRepoIDs, _ := redisClient.SMembers(context.Background(), sessionID).Result()
 			repoIDs, err := pgdb.GetTrendingRepositoryIDs(languages, tags, topics, seenRepoIDs)
 			if err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve repository list"})
+				errorResponse(c, http.StatusInternalServerError, "Failed to retrieve repository list", err, cfg.Debug)
 				return
 			}
 			recommendedRepoIDs = repoIDs
@@ -138,7 +148,7 @@ func handleRetrieveList(redisClient *redis.Client, pgdb *database.PostgresConnec
 		// Filter out repositories that have already been seen in this session
 		seenRepoIDs, err := redisClient.SMembers(context.Background(), sessionID).Result()
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve seen repositories"})
+			errorResponse(c, http.StatusInternalServerError, "Failed to retrieve seen repositories", err, cfg.Debug)
 			return
 		}
 
@@ -174,27 +184,72 @@ func handleRetrieveList(redisClient *redis.Client, pgdb *database.PostgresConnec
 		// Fetch full repository data
 		repositories, err := pgdb.GetRepositoriesDataByIDs(finalRepoIDs)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve full repository data"})
+			errorResponse(c, http.StatusInternalServerError, "Failed to retrieve full repository data", err, cfg.Debug)
 			return
 		}
 
-		// Add stats from ClickHouse
+		// Create a new response structure to control the output
+		type RepositoryResponse struct {
+			Repository          models.Repository       `json:"repository"`
+			Owner               models.Owner            `json:"owner"`
+			Stats               *models.RepositoryStat `json:"stats,omitempty"`
+			TotalViews          int              `json:"total_views"`
+			RecentViews         int              `json:"recent_views"`
+			TrendingScore       float64          `json:"trending_score"`
+			IsTrending          bool             `json:"is_trending"`
+			LastCrawledAt       time.Time        `json:"last_crawled_at"`
+			LastUpdatedAt       time.Time        `json:"last_updated_at"`
+			Crawled             bool             `json:"crawled"`
+			ProgrammingLanguage string           `json:"programming_language"`
+			SpokenLanguage      string           `json:"spoken_language"`
+			PopularityScore     float64          `json:"popularity_score"`
+			GrowthScore         float64          `json:"growth_score"`
+			ProjectHealth       float64          `json:"project_health"`
+			SimilarityScore     float64          `json:"similarity_score"`
+		}
+
+		responseRepos := make([]RepositoryResponse, len(repositories))
+
+		// Add stats from ClickHouse and filter fields
 		for i, repo := range repositories {
 			stats, err := chdb.GetRepositoryStats(int64(repo.Repository.ID))
 			if err != nil {
 				log.Printf("Failed to get stats for repository %d from ClickHouse: %v", repo.Repository.ID, err)
 			}
-			repositories[i].Stats = stats
+
+			var lastStat *models.RepositoryStat
+			if len(stats) > 0 {
+				lastStat = &stats[len(stats)-1]
+			}
+
+			responseRepos[i] = RepositoryResponse{
+				Repository:          repo.Repository,
+				Owner:               repo.Owner,
+				Stats:               lastStat,
+				TotalViews:          repo.TotalViews,
+				RecentViews:         repo.RecentViews,
+				TrendingScore:       repo.TrendingScore,
+				IsTrending:          repo.IsTrending,
+				LastCrawledAt:       repo.LastCrawledAt,
+				LastUpdatedAt:       repo.LastUpdatedAt,
+				Crawled:             repo.Crawled,
+				ProgrammingLanguage: repo.ProgrammingLanguage,
+				SpokenLanguage:      repo.SpokenLanguage,
+				PopularityScore:     repo.PopularityScore,
+				GrowthScore:         repo.GrowthScore,
+				ProjectHealth:       repo.ProjectHealth,
+				SimilarityScore:     repo.SimilarityScore,
+			}
 		}
 
 		c.JSON(http.StatusOK, gin.H{
 			"sessionId":    sessionID,
-			"repositories": repositories,
+			"repositories": responseRepos,
 		})
 	}
 }
 
-func handleTrackOpenRepository(redisClient *redis.Client, pgdb *database.PostgresConnection) gin.HandlerFunc {
+func handleTrackOpenRepository(cfg *config.Config, redisClient *redis.Client, pgdb *database.PostgresConnection) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var requestBody struct {
 			SessionID    string `json:"sessionId"`
@@ -202,12 +257,12 @@ func handleTrackOpenRepository(redisClient *redis.Client, pgdb *database.Postgre
 		}
 
 		if err := c.BindJSON(&requestBody); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+			errorResponse(c, http.StatusBadRequest, "Invalid request body", err, cfg.Debug)
 			return
 		}
 
 		if err := pgdb.TrackRepositoryView(requestBody.SessionID, requestBody.RepositoryID); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to track repository view"})
+			errorResponse(c, http.StatusInternalServerError, "Failed to track repository view", err, cfg.Debug)
 			return
 		}
 
