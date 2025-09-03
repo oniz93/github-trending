@@ -7,8 +7,11 @@ export interface FeedProject {
     language: string | null;
     stargazers_count: number;
     forks_count: number;
+    watchers_count: number;
+    open_issues_count: number;
     created_at: string;
     updated_at: string;
+    pushed_at: string;
     owner: {
         login: string;
         avatar_url: string;
@@ -18,6 +21,10 @@ export interface FeedProject {
     forksUrl: string;
     default_branch: string;
     type: 'repo' | 'ad' | 'message';
+    stats: RepositoryStat[];
+    topics: string[];
+    languages: { [key: string]: number };
+    license: { name: string } | null;
 }
 
 export interface Repository {
@@ -71,6 +78,14 @@ export interface RepositoryResponse {
         forks_count: number;
         created_at: string;
         updated_at: string;
+        topics: string[];
+        languages: { [key: string]: number };
+        license: {
+            name: {
+                String: string;
+                Valid: boolean;
+            };
+        } | null;
     };
     owner: {
         login: string;

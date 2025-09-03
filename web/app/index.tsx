@@ -1,9 +1,8 @@
-import React, { useEffect, useState, useRef } from 'react';
-import { View, FlatList, ActivityIndicator, StyleSheet, Dimensions, Text, TouchableOpacity } from 'react-native';
+import React, { useEffect, useState, useRef, useCallback } from 'react';
+import { View, FlatList, ActivityIndicator, Dimensions, Text, TouchableOpacity } from 'react-native';
 import { getRepositories, fetchReadme } from '../services/api';
 import { FeedProject } from '../types/repository';
 import RepositoryCard from '../components/RepositoryCard';
-import PromotedRepoCard from '../components/PromotedRepositoryCard';
 import SpecialMessageCard from '../components/SpecialMessageCard';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -17,6 +16,20 @@ const FeedScreen = () => {
   const [page, setPage] = useState(0);
   const [sessionId, setSessionId] = useState<string | undefined>(undefined);
   const flatListRef = useRef<FlatList>(null);
+  const fetchedReadmes = useRef(new Set<string>());
+  const projectsRef = useRef(projects);
+  projectsRef.current = projects;
+
+  const prefetchReadmes = useCallback(async (startIndex: number, count: number) => {
+    for (let i = startIndex; i < startIndex + count && i < projectsRef.current.length; i++) {
+      const project = projectsRef.current[i];
+      if (project.type === 'repo' && !fetchedReadmes.current.has(project.id)) {
+        fetchedReadmes.current.add(project.id);
+        const readme = await fetchReadme(project.full_name);
+        setProjects(prev => prev.map(p => p.id === project.id ? { ...p, readmeSnippet: readme } : p));
+      }
+    }
+  }, []);
 
   useEffect(() => {
     const loadSession = async () => {
@@ -24,10 +37,16 @@ const FeedScreen = () => {
       if (storedSessionId) {
         setSessionId(storedSessionId);
       }
-      loadRepositories(0, storedSessionId || undefined);
+      await loadRepositories(0, storedSessionId || undefined);
     };
     loadSession();
   }, []);
+
+  useEffect(() => {
+    if (page === 1 && projects.length > 0) { // After first page is loaded
+      prefetchReadmes(0, 5);
+    }
+  }, [page, projects, prefetchReadmes]);
 
   const loadRepositories = async (currentPage: number, currentSessionId?: string) => {
     if (loading) return;
@@ -60,28 +79,29 @@ const FeedScreen = () => {
   };
 
   const onViewableItemsChanged = useRef(({ viewableItems }: { viewableItems: any[] }) => {
-    viewableItems.forEach(async (item) => {
-      const project = item.item as FeedProject;
-      if (project.type === 'repo' && !project.readmeSnippet) {
-        const readme = await fetchReadme(project.full_name);
-        setProjects(prev => prev.map(p => p.id === project.id ? { ...p, readmeSnippet: readme } : p));
+    if (viewableItems.length > 0) {
+      const lastVisibleItem = viewableItems[viewableItems.length - 1];
+      const nextIndex = lastVisibleItem.index + 1;
+      if (nextIndex < projectsRef.current.length) {
+        prefetchReadmes(nextIndex, 1);
       }
-    });
+    }
   }).current;
 
   const renderItem = ({ item }: { item: FeedProject }) => {
-    if (item.type === 'message') {
-      return <SpecialMessageCard project={item} />;
-    }
-    // For now, we'll use the standard card for all repos.
-    // We can add logic here to use PromotedRepoCard for specific projects.
+    const card = item.type === 'message'
+      ? <SpecialMessageCard project={item} />
+      : <RepositoryCard
+          project={item}
+          renderMarkdown={(content) => content} // This will be replaced with a proper markdown renderer
+          formatNumber={(num) => num.toString()} // Placeholder
+          shareProject={(p) => console.log('share', p.name)} // Placeholder
+        />;
+
     return (
-      <RepositoryCard 
-        project={item} 
-        renderMarkdown={(content) => content} // This will be replaced with a proper markdown renderer
-        formatNumber={(num) => num.toString()} // Placeholder
-        shareProject={(p) => console.log('share', p.name)} // Placeholder
-      />
+      <View style={{ height, width: '100%' }}>
+        {card}
+      </View>
     );
   };
 

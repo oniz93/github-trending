@@ -25,17 +25,21 @@ export const getRepositories = async (page: number, sessionId?: string): Promise
       html_url: repo.repository.html_url,
       description: repo.repository.description.Valid ? repo.repository.description.String : '',
       stargazers_count: repo.stats.length > 0 ? repo.stats[0].stargazers_count : 0,
+      forks_count: repo.stats.length > 0 ? repo.stats[0].forks_count : 0,
+      watchers_count: repo.stats.length > 0 ? repo.stats[0].watchers_count : 0,
+      open_issues_count: repo.stats.length > 0 ? repo.stats[0].open_issues_count : 0,
+      pushed_at: repo.stats.length > 0 ? repo.stats[0].pushed_at : '',
       language: repo.repository.language.Valid ? repo.repository.language.String : 'Unknown',
-      readme_url: repo.repository.readme_url.Valid ? repo.repository.readme_url.String : '',
-      tags: repo.tags || [],
       stats: repo.stats || [],
-      forks_count: repo.repository.forks_count,
       created_at: repo.repository.created_at,
       updated_at: repo.repository.updated_at,
       stargazersUrl: `${repo.repository.html_url}/stargazers`,
       forksUrl: `${repo.repository.html_url}/forks`,
       default_branch: repo.repository.default_branch,
       type: 'repo',
+      topics: repo.repository.topics || [],
+      languages: repo.repository.languages || {},
+      license: repo.repository.license && repo.repository.license.name.Valid ? { name: repo.repository.license.name.String } : null,
     }));
 
     return { repositories, sessionId: newSessionId };
@@ -47,15 +51,30 @@ export const getRepositories = async (page: number, sessionId?: string): Promise
 
 export const fetchReadme = async (fullName: string) => {
     try {
-        const url = `https://api.github.com/repos/${fullName}/readme`;
-        const response = await axios.get(url, {
+        // 1. Fetch raw markdown
+        const readmeUrl = `https://api.github.com/repos/${fullName}/readme`;
+        const readmeResponse = await axios.get(readmeUrl, {
             headers: {
                 Accept: 'application/vnd.github.raw',
             }
         });
-        return response.data;
+        const markdown = readmeResponse.data;
+
+        // 2. Render markdown using the /markdown endpoint
+        const markdownUrl = 'https://api.github.com/markdown';
+        const markdownResponse = await axios.post(markdownUrl, {
+            text: markdown,
+            mode: 'gfm',
+            context: fullName
+        }, {
+            headers: {
+                Accept: 'application/vnd.github.html+json',
+            }
+        });
+
+        return markdownResponse.data;
     } catch (error) {
-        console.error('Error fetching README:', error);
+        console.error('Error fetching or rendering README:', error);
         return 'Could not load README.';
     }
 };

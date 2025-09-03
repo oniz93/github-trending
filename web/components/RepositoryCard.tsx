@@ -1,6 +1,8 @@
-import React from 'react';
-import { View, Text, StyleSheet, Image, TouchableOpacity } from 'react-native';
+import React, { useState } from 'react';
+import { View, Text, StyleSheet, Image, TouchableOpacity, Platform } from 'react-native';
 import { FeedProject } from '../types/repository';
+import { WebView } from 'react-native-webview';
+import Tooltip from './Tooltip';
 
 interface RepoCardProps {
   project: FeedProject;
@@ -38,6 +40,17 @@ const getLanguageColor = (language: string | null): string => {
 };
 
 const RepoCard: React.FC<RepoCardProps> = ({ project, renderMarkdown, formatNumber, shareProject }) => {
+  const [visibleTooltip, setVisibleTooltip] = useState<string | null>(null);
+  const totalLanguagesSize = Object.values(project.languages).reduce((acc, size) => acc + size, 0);
+
+  const statItems = [
+    { key: 'stars', icon: '★', value: formatNumber(project.stargazers_count), label: 'Stars' },
+    { key: 'forks', icon: '⑂', value: formatNumber(project.forks_count), label: 'Forks' },
+    { key: 'watchers', icon: '👁', value: formatNumber(project.watchers_count), label: 'Watchers' },
+    { key: 'issues', icon: '🐞', value: formatNumber(project.open_issues_count), label: 'Open Issues' },
+    { key: 'share', icon: '🔗', value: 'Share', label: 'Share' },
+  ];
+
   return (
     <View style={styles.cardContainer}>
       <View style={styles.header}>
@@ -49,34 +62,122 @@ const RepoCard: React.FC<RepoCardProps> = ({ project, renderMarkdown, formatNumb
           </View>
         )}
       </View>
+
+      <View style={styles.statsContainer}>
+        {statItems.map(item => (
+          <View
+            key={item.key}
+            onMouseEnter={() => Platform.OS === 'web' && setVisibleTooltip(item.key)}
+            onMouseLeave={() => Platform.OS === 'web' && setVisibleTooltip(null)}
+          >
+            <TouchableOpacity
+              style={styles.statItem}
+              onPress={() => item.key === 'share' && shareProject(project)}
+              onLongPress={() => Platform.OS !== 'web' && setVisibleTooltip(item.key)}
+              onPressOut={() => Platform.OS !== 'web' && setVisibleTooltip(null)}
+            >
+              {visibleTooltip === item.key && <Tooltip text={item.label} />}
+              <Text style={styles.statIcon}>{item.icon}</Text>
+              <Text style={styles.statText}>{item.value}</Text>
+            </TouchableOpacity>
+          </View>
+        ))}
+      </View>
+
       <Text style={styles.description}>{project.description}</Text>
+
+      {project.topics && project.topics.length > 0 && (
+        <View style={styles.topicsContainer}>
+          {project.topics.slice(0, 5).map(topic => (
+            <View key={topic} style={styles.topicBadge}>
+              <Text style={styles.topicText}>{topic}</Text>
+            </View>
+          ))}
+        </View>
+      )}
+
+      {totalLanguagesSize > 0 && (
+        <View style={styles.languagesBar}>
+          {Object.entries(project.languages).map(([lang, size]) => (
+            <View key={lang} style={{ width: `${(size / totalLanguagesSize) * 100}%`, backgroundColor: getLanguageColor(lang), height: 8 }} />
+          ))}
+        </View>
+      )}
 
       <View style={styles.readmeContainer}>
         {project.readmeSnippet ? (
-          <View style={{ flex: 1 }} dangerouslySetInnerHTML={{ __html: renderMarkdown(project.readmeSnippet) }} />
+          Platform.OS === 'web' ? (
+            <iframe
+              srcDoc={`
+                <style>
+                  body {
+                    background-color: transparent;
+                    color: #c9d1d9;
+                    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji";
+                    font-size: 16px;
+                    line-height: 1.5;
+                    margin: 0;
+                    padding: 16px;
+                  }
+                  a {
+                    color: #58a6ff;
+                  }
+                  h1, h2, h3, h4, h5, h6 {
+                    color: #c9d1d9;
+                    border-bottom-color: #30363d;
+                  }
+                  pre, code {
+                    background-color: #161b22;
+                    border-color: #30363d;
+                  }
+                </style>
+                ${project.readmeSnippet}
+              `}
+              style={{ width: '100%', height: '100%', border: 'none' }}
+              sandbox="allow-scripts"
+              scrolling="no"
+            />
+          ) : (
+            <WebView
+              originWhitelist={['*']}
+              source={{ html: `
+                <style>
+                  body {
+                    background-color: transparent;
+                    color: #c9d1d9;
+                    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji";
+                    font-size: 16px;
+                    line-height: 1.5;
+                    padding: 16px;
+                  }
+                  a {
+                    color: #58a6ff;
+                  }
+                  h1, h2, h3, h4, h5, h6 {
+                    color: #c9d1d9;
+                    border-bottom-color: #30363d;
+                  }
+                  pre, code {
+                    background-color: #161b22;
+                    border-color: #30363d;
+                  }
+                </style>
+                ${project.readmeSnippet}
+              ` }}
+              style={{ backgroundColor: 'transparent', flex: 1 }}
+              scrollEnabled={false}
+            />
+          )
         ) : (
           <Text style={styles.loadingText}>Loading README...</Text>
         )}
       </View>
 
-      <View style={styles.statsContainer}>
-        <TouchableOpacity style={styles.statItem} onPress={() => {}}>
-          <Text style={styles.statIcon}>★</Text>
-          <Text style={styles.statText}>{formatNumber(project.stargazers_count)}</Text>
-        </TouchableOpacity>
-        <TouchableOpacity style={styles.statItem} onPress={() => {}}>
-          <Text style={styles.statIcon}>⑂</Text>
-          <Text style={styles.statText}>{formatNumber(project.forks_count)}</Text>
-        </TouchableOpacity>
-        <TouchableOpacity style={styles.statItem} onPress={() => shareProject(project)}>
-          <Text style={styles.statIcon}>🔗</Text>
-          <Text style={styles.statText}>Share</Text>
-        </TouchableOpacity>
-      </View>
-
       <View style={styles.footer}>
         <Image source={{ uri: project.owner.avatar_url }} style={styles.avatar} />
         <Text style={styles.ownerLogin}>{project.owner.login}</Text>
+        {project.license && <Text style={styles.licenseText}>{project.license.name}</Text>}
+        <Text style={styles.pushedAtText}>Pushed {new Date(project.pushed_at).toLocaleDateString()}</Text>
         <TouchableOpacity style={styles.viewButton} onPress={() => {}}>
           <Text style={styles.viewButtonText}>View</Text>
         </TouchableOpacity>
@@ -128,31 +229,54 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
     borderRadius: 8,
     backgroundColor: 'rgba(22, 27, 34, 0.5)',
-    padding: 16,
     backdropFilter: 'blur(10px)',
   },
   loadingText: {
     color: '#8b949e',
   },
   statsContainer: {
-    position: 'absolute',
-    right: 16,
-    bottom: 120, 
-    alignItems: 'center',
-    gap: 24,
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 16,
+    marginBottom: 8,
   },
   statItem: {
+    flexDirection: 'row',
     alignItems: 'center',
+    gap: 4,
   },
   statIcon: {
-    fontSize: 24,
+    fontSize: 16,
     color: '#f0a500',
   },
   statText: {
     color: 'white',
     fontSize: 14,
     fontFamily: 'monospace',
-    marginTop: 4,
+  },
+  topicsContainer: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginBottom: 8,
+  },
+  topicBadge: {
+    backgroundColor: 'rgba(33, 150, 243, 0.2)',
+    borderRadius: 16,
+    paddingVertical: 4,
+    paddingHorizontal: 12,
+  },
+  topicText: {
+    color: '#58a6ff',
+    fontSize: 12,
+    fontWeight: 'bold',
+  },
+  languagesBar: {
+    flexDirection: 'row',
+    height: 8,
+    borderRadius: 4,
+    overflow: 'hidden',
+    marginBottom: 16,
   },
   footer: {
     flexDirection: 'row',
@@ -170,6 +294,18 @@ const styles = StyleSheet.create({
     fontSize: 16,
     color: 'white',
     flex: 1,
+  },
+  licenseText: {
+    fontFamily: 'monospace',
+    fontSize: 14,
+    color: '#8b949e',
+    marginHorizontal: 8,
+  },
+  pushedAtText: {
+    fontFamily: 'monospace',
+    fontSize: 14,
+    color: '#8b949e',
+    marginHorizontal: 8,
   },
   viewButton: {
     paddingVertical: 8,
