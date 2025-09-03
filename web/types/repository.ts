@@ -21,7 +21,7 @@ export interface FeedProject {
     forksUrl: string;
     default_branch: string;
     type: 'repo' | 'ad' | 'message';
-    stats: RepositoryStat[];
+    stats: RepositoryStat;
     topics: string[];
     languages: { [key: string]: number };
     license: { name: string } | null;
@@ -41,8 +41,7 @@ export interface Repository {
     language: string;
     languages: { [key: string]: number };
     readme_url: string;
-    tags: string[];
-    stats: RepositoryStat[];
+    stats: RepositoryStat;
 }
 
 export interface RepositoryStat {
@@ -91,6 +90,5 @@ export interface RepositoryResponse {
         login: string;
         avatar_url: string;
     };
-    stats: RepositoryStat[];
-    tags: string[];
+    stats: RepositoryStat;
 }
