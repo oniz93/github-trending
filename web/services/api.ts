@@ -29,7 +29,11 @@ export const getRepositories = async (page: number, sessionId?: string): Promise
       watchers_count: repo.stats ? repo.stats.watchers_count : 0,
       open_issues_count: repo.stats ? repo.stats.open_issues_count : 0,
       pushed_at: repo.stats ? repo.stats.pushed_at : '',
-      language: repo.repository.language.Valid ? repo.repository.language.String : 'Unknown',
+      language: repo.repository.language.Valid 
+        ? repo.repository.language.String 
+        : (Object.keys(repo.repository.languages).length > 0 
+            ? Object.keys(repo.repository.languages).reduce((a, b) => repo.repository.languages[a] > repo.repository.languages[b] ? a : b)
+            : 'Unknown'),
       stats: repo.stats,
       created_at: repo.repository.created_at,
       updated_at: repo.repository.updated_at,
@@ -49,32 +53,23 @@ export const getRepositories = async (page: number, sessionId?: string): Promise
   }
 };
 
-export const fetchReadme = async (fullName: string) => {
+export const fetchReadme = async (repoId: string) => {
     try {
-        // 1. Fetch raw markdown
-        const readmeUrl = `https://api.github.com/repos/${fullName}/readme`;
-        const readmeResponse = await axios.get(readmeUrl, {
-            headers: {
-                Accept: 'application/vnd.github.raw',
-            }
-        });
-        const markdown = readmeResponse.data;
-
-        // 2. Render markdown using the /markdown endpoint
-        const markdownUrl = 'https://api.github.com/markdown';
-        const markdownResponse = await axios.post(markdownUrl, {
-            text: markdown,
-            mode: 'gfm',
-            context: fullName
-        }, {
-            headers: {
-                Accept: 'application/vnd.github.html+json',
-            }
-        });
-
-        return markdownResponse.data;
+        const response = await axios.get(`${API_BASE_URL}/getReadme?repoId=${repoId}`);
+        return response.data;
     } catch (error) {
-        console.error('Error fetching or rendering README:', error);
-        return 'Could not load README.';
+        console.error('Error fetching README:', error);
+        throw error;
+    }
+};
+
+export const trackOpenRepository = async (sessionId: string, repositoryId: string) => {
+    try {
+        await axios.post(`${API_BASE_URL}/trackOpenRepository`, {
+            sessionId,
+            repositoryId: parseInt(repositoryId, 10),
+        });
+    } catch (error) {
+        console.error('Error tracking open repository:', error);
     }
 };

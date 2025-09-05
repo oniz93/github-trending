@@ -1,11 +1,14 @@
 import React, { useState } from 'react';
-import { View, Text, StyleSheet, Image, TouchableOpacity, Platform } from 'react-native';
+import { View, Text, StyleSheet, Image, TouchableOpacity, Platform, Linking } from 'react-native';
 import { FeedProject } from '../types/repository';
 import { WebView } from 'react-native-webview';
 import Tooltip from './Tooltip';
+import { trackOpenRepository } from '../services/api';
+import AutoShrinkingText from './AutoShrinkingText';
 
 interface RepoCardProps {
   project: FeedProject;
+  sessionId: string | undefined;
   renderMarkdown: (content: string) => string;
   formatNumber: (num: number) => string;
   shareProject: (project: FeedProject) => void;
@@ -39,7 +42,7 @@ const getLanguageColor = (language: string | null): string => {
   return languageColors[language] || '#808080';
 };
 
-const RepoCard: React.FC<RepoCardProps> = ({ project, renderMarkdown, formatNumber, shareProject }) => {
+const RepoCard: React.FC<RepoCardProps> = ({ project, sessionId, renderMarkdown, formatNumber, shareProject }) => {
   const [visibleTooltip, setVisibleTooltip] = useState<string | null>(null);
   const totalLanguagesSize = Object.values(project.languages).reduce((acc, size) => acc + size, 0);
 
@@ -175,10 +178,21 @@ const RepoCard: React.FC<RepoCardProps> = ({ project, renderMarkdown, formatNumb
 
       <View style={styles.footer}>
         <Image source={{ uri: project.owner.avatar_url }} style={styles.avatar} />
-        <Text style={styles.ownerLogin}>{project.owner.login}</Text>
-        {project.license && <Text style={styles.licenseText}>{project.license.name}</Text>}
-        <Text style={styles.pushedAtText}>Pushed {new Date(project.pushed_at).toLocaleDateString()}</Text>
-        <TouchableOpacity style={styles.viewButton} onPress={() => {}}>
+        <View style={styles.footerTextContainer}>
+          <Text style={styles.ownerLogin}>{project.owner.login}</Text>
+          <View style={styles.footerMetaContainer}>
+            <AutoShrinkingText
+              text={`${project.license ? project.license.name + ' | ' : ''}Pushed ${new Date(project.pushed_at).toLocaleDateString()}`}
+              style={styles.pushedAtText}
+            />
+          </View>
+        </View>
+          <TouchableOpacity style={styles.viewButton} onPress={() => {
+              if (sessionId) {
+                  trackOpenRepository(sessionId, project.id);
+              }
+              Linking.openURL(project.html_url);
+          }}>
           <Text style={styles.viewButtonText}>View</Text>
         </TouchableOpacity>
       </View>
@@ -289,23 +303,28 @@ const styles = StyleSheet.create({
     borderRadius: 20,
     marginRight: 8,
   },
+  footerTextContainer: {
+    flex: 1,
+  },
   ownerLogin: {
     fontFamily: 'monospace',
     fontSize: 16,
     color: 'white',
-    flex: 1,
+  },
+  footerMetaContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
   },
   licenseText: {
     fontFamily: 'monospace',
     fontSize: 14,
     color: '#8b949e',
-    marginHorizontal: 8,
+    marginRight: 8,
   },
   pushedAtText: {
     fontFamily: 'monospace',
     fontSize: 14,
     color: '#8b949e',
-    marginHorizontal: 8,
   },
   viewButton: {
     paddingVertical: 8,

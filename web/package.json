@@ -15,6 +15,7 @@
     "@react-navigation/stack": "^7.4.7",
     "axios": "^1.11.0",
     "expo": "~53.0.22",
+    "expo-clipboard": "^7.1.5",
     "expo-linear-gradient": "^14.1.5",
     "expo-router": "^5.1.4",
     "expo-status-bar": "~2.2.3",

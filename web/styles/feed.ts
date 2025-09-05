@@ -3,7 +3,7 @@ import { StyleSheet } from 'react-native';
 export const feedStyles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#000',
+    backgroundColor: '#0d1117',
   },
   gradient: {
     position: 'absolute',
@@ -23,26 +23,27 @@ export const feedStyles = StyleSheet.create({
     zIndex: 1,
   },
   topBarButton: {
-    paddingVertical: 8,
-    paddingHorizontal: 16,
-    borderRadius: 6,
-    backgroundColor: 'rgba(33, 38, 45, 0.8)',
-    marginLeft: 8,
-    backdropFilter: 'blur(10px)',
+    display: 'none',
   },
   topBarButtonText: {
     color: 'white',
     fontWeight: 'bold',
   },
   loadingContainer: {
-    flex: 1,
-    justifyContent: 'center',
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    justifyContent: 'flex-end',
     alignItems: 'center',
-    backgroundColor: '#0d1117',
+    zIndex: 2,
+    paddingBottom: '15%',
   },
-  loadingText: {
+  apologyText: {
     color: 'white',
-    marginTop: 8,
+    marginTop: 10,
+    fontSize: 16,
   },
   projectContainer: {
     flex: 1,
