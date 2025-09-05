@@ -163,6 +163,68 @@ func (pc *PostgresConnection) getTrendingRepositoryIDsFromDB(languages, tags, to
 	return ids, nil
 }
 
+// FilterRepositoryIDs filters a list of repository IDs based on languages, tags, and topics.
+func (pc *PostgresConnection) FilterRepositoryIDs(repoIDs []int64, languages, tags, topics []string) ([]int64, error) {
+	if len(repoIDs) == 0 || (len(languages) == 0 && len(tags) == 0 && len(topics) == 0) {
+		return repoIDs, nil
+	}
+
+	query := `SELECT id FROM repositories WHERE id = ANY($1)`
+	args := []interface{}{pq.Array(repoIDs)}
+	argCounter := 2
+
+	if len(languages) > 0 {
+		query += fmt.Sprintf(" AND id IN (SELECT repository_id FROM repository_languages rl JOIN languages l ON rl.language_id = l.id WHERE l.name = ANY($%d))", argCounter)
+		args = append(args, pq.Array(languages))
+		argCounter++
+	}
+
+	if len(tags) > 0 {
+		query += fmt.Sprintf(" AND id IN (SELECT repository_id FROM repository_tags rt JOIN tags t ON rt.tag_id = t.id WHERE t.name = ANY($%d))", argCounter)
+		args = append(args, pq.Array(tags))
+		argCounter++
+	}
+
+	if len(topics) > 0 {
+		query += fmt.Sprintf(" AND id IN (SELECT repository_id FROM repository_topics rt JOIN topics t ON rt.topic_id = t.id WHERE t.name = ANY($%d))", argCounter)
+		args = append(args, pq.Array(topics))
+		argCounter++
+	}
+
+	log.Printf("Executing PostgreSQL filter query with %d repo IDs and filters (languages: %v, tags: %v, topics: %v)\nQuery: %s", len(repoIDs), languages, tags, topics, query)
+
+	rows, err := pc.DB.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var filteredIDs []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		filteredIDs = append(filteredIDs, id)
+	}
+
+	log.Printf("PostgreSQL filter query returned %d repository IDs.", len(filteredIDs))
+
+	filteredIDMap := make(map[int64]bool)
+	for _, id := range filteredIDs {
+		filteredIDMap[id] = true
+	}
+
+	var result []int64
+	for _, id := range repoIDs {
+		if filteredIDMap[id] {
+			result = append(result, id)
+		}
+	}
+
+	return result, nil
+}
+
 // GetLastCrawlTime retrieves the last time a repository was crawled.
 func (pc *PostgresConnection) GetLastCrawlTime(repoID int64) (time.Time, error) {
 	if pc.RedisClient != nil {

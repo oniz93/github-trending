@@ -184,3 +184,55 @@ func (ch *ClickHouseConnection) GetRepositoryIDsToUpdate(since time.Time) ([]int
 
 	return repoIDs, nil
 }
+
+// GetTrendingRepositoryIDsByGrowth retrieves repository IDs based on star and fork growth over a period.
+func (ch *ClickHouseConnection) GetTrendingRepositoryIDsByGrowth(days int) ([]int64, error) {
+	startTime := time.Now().AddDate(0, 0, -days)
+
+	query := `
+		WITH
+			repo_latest_stats AS (
+				SELECT
+					repository_id,
+					argMax(stargazers_count, event_time) AS latest_stars,
+					argMax(forks_count, event_time) AS latest_forks
+				FROM repository_stats
+				GROUP BY repository_id
+			),
+			repo_past_stats AS (
+				SELECT
+					repository_id,
+					argMax(stargazers_count, event_time) AS past_stars,
+					argMax(forks_count, event_time) AS past_forks
+				FROM repository_stats
+				WHERE event_time <= ?
+				GROUP BY repository_id
+			)
+		SELECT
+			l.repository_id
+		FROM repo_latest_stats AS l
+		JOIN repo_past_stats AS p ON l.repository_id = p.repository_id
+		WHERE (l.latest_stars > p.past_stars OR l.latest_forks > p.past_forks)
+		ORDER BY (l.latest_stars - p.past_stars) + (l.latest_forks - p.past_forks) DESC
+		LIMIT 200
+	`
+	// log.Printf("Executing ClickHouse trending query with start time: %v\nQuery: %s", startTime, query)
+
+	rows, err := ch.DB.Query(query, startTime)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+
+	// log.Printf("ClickHouse trending query returned %d repository IDs.", len(ids))
+	return ids, nil
+}

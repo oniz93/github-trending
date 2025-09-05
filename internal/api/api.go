@@ -1,9 +1,11 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"sort"
@@ -20,7 +22,7 @@ import (
 	"github.com/teomiscia/github-trending/internal/models"
 )
 
-func NewServer(cfg *config.Config, redisClient *redis.Client, pgdb *database.PostgresConnection, chdb *database.ClickHouseConnection) *gin.Engine {
+func NewServer(cfg *config.Config, redisClient *redis.Client, pgdb *database.PostgresConnection, chdb *database.ClickHouseConnection, minioConnection *database.MinioConnection) *gin.Engine {
 	router := gin.Default()
 
 	// Add CORS middleware
@@ -30,6 +32,7 @@ func NewServer(cfg *config.Config, redisClient *redis.Client, pgdb *database.Pos
 
 	router.GET("/retrieveList", handleRetrieveList(cfg, redisClient, pgdb, chdb))
 	router.POST("/trackOpenRepository", handleTrackOpenRepository(cfg, redisClient, pgdb))
+	router.GET("/getReadme", handleGetReadme(cfg, minioConnection))
 
 	return router
 }
@@ -70,21 +73,41 @@ func handleRetrieveList(cfg *config.Config, redisClient *redis.Client, pgdb *dat
 		if err != nil {
 			log.Printf("Failed to get user history from Postgres: %v", err)
 			// Fallback to generic trending if history fails
-			repoIDs, err := pgdb.GetTrendingRepositoryIDs(languages, tags, topics, []string{})
+			trendingRepoIDs, err := chdb.GetTrendingRepositoryIDsByGrowth(30) // Using 7 days as default
 			if err != nil {
-				errorResponse(c, http.StatusInternalServerError, "Failed to retrieve repository list", err, cfg.Debug)
+				errorResponse(c, http.StatusInternalServerError, "Failed to retrieve trending repository list from ClickHouse", err, cfg.Debug)
 				return
 			}
-			recommendedRepoIDs = repoIDs
+			// If filters are provided, filter the list of IDs
+			if len(languages) > 0 || len(tags) > 0 || len(topics) > 0 {
+				filteredRepoIDs, err := pgdb.FilterRepositoryIDs(trendingRepoIDs, languages, tags, topics)
+				if err != nil {
+					errorResponse(c, http.StatusInternalServerError, "Failed to filter repository list", err, cfg.Debug)
+					return
+				}
+				recommendedRepoIDs = filteredRepoIDs
+			} else {
+				recommendedRepoIDs = trendingRepoIDs
+			}
 		} else if len(userHistoryRepoIDs) == 0 {
-			// 2. If no user history exists, fall back to generic trending
-			seenRepoIDs, _ := redisClient.SMembers(context.Background(), sessionID).Result()
-			repoIDs, err := pgdb.GetTrendingRepositoryIDs(languages, tags, topics, seenRepoIDs)
+			// 2. If no user history exists, fall back to generic trending based on ClickHouse growth
+			trendingRepoIDs, err := chdb.GetTrendingRepositoryIDsByGrowth(30) // Using 7 days as default
 			if err != nil {
-				errorResponse(c, http.StatusInternalServerError, "Failed to retrieve repository list", err, cfg.Debug)
+				errorResponse(c, http.StatusInternalServerError, "Failed to retrieve trending repository list from ClickHouse", err, cfg.Debug)
 				return
 			}
-			recommendedRepoIDs = repoIDs
+
+			// If filters are provided, filter the list of IDs
+			if len(languages) > 0 || len(tags) > 0 || len(topics) > 0 {
+				filteredRepoIDs, err := pgdb.FilterRepositoryIDs(trendingRepoIDs, languages, tags, topics)
+				if err != nil {
+					errorResponse(c, http.StatusInternalServerError, "Failed to filter repository list", err, cfg.Debug)
+					return
+				}
+				recommendedRepoIDs = filteredRepoIDs
+			} else {
+				recommendedRepoIDs = trendingRepoIDs
+			}
 		} else {
 			// 3. If user history exists, aggregate similar repositories
 			candidateScores := make(map[int64]float64)
@@ -180,6 +203,7 @@ func handleRetrieveList(cfg *config.Config, redisClient *redis.Client, pgdb *dat
 		} else {
 			finalRepoIDs = finalRepoIDs[start:end]
 		}
+		log.Printf("Final repo IDs after pagination: %d", len(finalRepoIDs))
 
 		// Fetch full repository data
 		repositories, err := pgdb.GetRepositoriesDataByIDs(finalRepoIDs)
@@ -190,22 +214,22 @@ func handleRetrieveList(cfg *config.Config, redisClient *redis.Client, pgdb *dat
 
 		// Create a new response structure to control the output
 		type RepositoryResponse struct {
-			Repository          models.Repository       `json:"repository"`
-			Owner               models.Owner            `json:"owner"`
+			Repository          models.Repository      `json:"repository"`
+			Owner               models.Owner           `json:"owner"`
 			Stats               *models.RepositoryStat `json:"stats,omitempty"`
-			TotalViews          int              `json:"total_views"`
-			RecentViews         int              `json:"recent_views"`
-			TrendingScore       float64          `json:"trending_score"`
-			IsTrending          bool             `json:"is_trending"`
-			LastCrawledAt       time.Time        `json:"last_crawled_at"`
-			LastUpdatedAt       time.Time        `json:"last_updated_at"`
-			Crawled             bool             `json:"crawled"`
-			ProgrammingLanguage string           `json:"programming_language"`
-			SpokenLanguage      string           `json:"spoken_language"`
-			PopularityScore     float64          `json:"popularity_score"`
-			GrowthScore         float64          `json:"growth_score"`
-			ProjectHealth       float64          `json:"project_health"`
-			SimilarityScore     float64          `json:"similarity_score"`
+			TotalViews          int                    `json:"total_views"`
+			RecentViews         int                    `json:"recent_views"`
+			TrendingScore       float64                `json:"trending_score"`
+			IsTrending          bool                   `json:"is_trending"`
+			LastCrawledAt       time.Time              `json:"last_crawled_at"`
+			LastUpdatedAt       time.Time              `json:"last_updated_at"`
+			Crawled             bool                   `json:"crawled"`
+			ProgrammingLanguage string                 `json:"programming_language"`
+			SpokenLanguage      string                 `json:"spoken_language"`
+			PopularityScore     float64                `json:"popularity_score"`
+			GrowthScore         float64                `json:"growth_score"`
+			ProjectHealth       float64                `json:"project_health"`
+			SimilarityScore     float64                `json:"similarity_score"`
 		}
 
 		responseRepos := make([]RepositoryResponse, len(repositories))
@@ -270,5 +294,55 @@ func handleTrackOpenRepository(cfg *config.Config, redisClient *redis.Client, pg
 		redisClient.SAdd(context.Background(), requestBody.SessionID, fmt.Sprint(requestBody.RepositoryID))
 
 		c.JSON(http.StatusOK, gin.H{"status": "success"})
+	}
+}
+
+func handleGetReadme(cfg *config.Config, minioConnection *database.MinioConnection) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		repoID := c.Query("repoId")
+		if repoID == "" {
+			errorResponse(c, http.StatusBadRequest, "repoId query parameter is required", nil, cfg.Debug)
+			return
+		}
+
+		// Construct the object name for MinIO
+		objectName := fmt.Sprintf("readmes/%s.md", repoID)
+
+		// Get the README content from MinIO
+		readmeContent, err := minioConnection.GetFile(context.Background(), objectName)
+		if err != nil {
+			errorResponse(c, http.StatusNotFound, "README not found", err, cfg.Debug)
+			return
+		}
+
+		// Call the markup service to convert Markdown to HTML
+		reqBody, err := json.Marshal(map[string]string{
+			"text": string(readmeContent),
+		})
+		if err != nil {
+			errorResponse(c, http.StatusInternalServerError, "Failed to create request body for markup service", err, cfg.Debug)
+			return
+		}
+
+		resp, err := http.Post("http://markup-service:80/markup", "application/json", bytes.NewBuffer(reqBody))
+		if err != nil {
+			errorResponse(c, http.StatusInternalServerError, "Failed to call markup service", err, cfg.Debug)
+			return
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			bodyBytes, _ := io.ReadAll(resp.Body)
+			errorResponse(c, http.StatusInternalServerError, fmt.Sprintf("Markup service returned non-OK status: %d, body: %s", resp.StatusCode, string(bodyBytes)), nil, cfg.Debug)
+			return
+		}
+
+		var result map[string]string
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			errorResponse(c, http.StatusInternalServerError, "Failed to decode markup service response", err, cfg.Debug)
+			return
+		}
+
+		c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(result["html"]))
 	}
 }

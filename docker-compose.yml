@@ -240,6 +240,15 @@ services:
     networks:
       - github-trending-nw
 
+  markup-service:
+    build:
+      context: ./cmd/markup-service
+    image: github-trending/markup-service
+    container_name: markup-service
+    restart: unless-stopped
+    networks:
+      - github-trending-nw
+
   embedding-api-service:
     build:
       context: .

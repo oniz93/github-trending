@@ -61,7 +61,20 @@ func main() {
 		log.Fatalf("Failed to connect to ClickHouse after %d retries: %v", maxRetries, err)
 	}
 
-	server := api.NewServer(cfg, redisClient, postgresConnection, clickhouseConnection)
+	var minioConnection *database.MinioConnection
+	for i := 0; i < maxRetries; i++ {
+		minioConnection, err = database.NewMinioConnection(cfg.MinioEndpoint, cfg.MinioRootUser, cfg.MinioRootPassword)
+		if err == nil {
+			break
+		}
+		log.Printf("Failed to connect to MinIO: %v. Retrying in %v...", err, retryDelay)
+		time.Sleep(retryDelay)
+	}
+	if err != nil {
+		log.Fatalf("Failed to connect to MinIO after %d retries: %v", maxRetries, err)
+	}
+
+	server := api.NewServer(cfg, redisClient, postgresConnection, clickhouseConnection, minioConnection)
 
 	log.Println("API Server started. Listening on :8080")
 	log.Fatal(server.Run(":8080"))
