@@ -5,3 +5,4 @@ trigger_discovery
 vendor
 gittok.dev-main
 web_old
+.DS_Store
