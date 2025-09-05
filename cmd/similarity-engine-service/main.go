@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	numWorkers = 5
+	numWorkers = 2
 	maxRetries = 5
 	retryDelay = 5 * time.Second
 )
