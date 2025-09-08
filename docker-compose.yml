@@ -1,8 +1,6 @@
-# github-trending/docker-compose.yml
+version: '3.8'
 
 services:
-  # --- INFRASTRUCTURE ---
-
   rabbitmq:
     image: rabbitmq:management-alpine
     container_name: rabbitmq
@@ -38,7 +36,8 @@ services:
       retries: 5
     command: postgres -c shared_preload_libraries=pg_stat_statements
     networks:
-      - github-trending-nw
+      github-trending-nw:
+        ipv4_address: 10.0.1.101
 
   minio:
     image: minio/minio:latest
@@ -57,7 +56,8 @@ services:
       timeout: 5s
       retries: 5
     networks:
-      - github-trending-nw
+      github-trending-nw:
+        ipv4_address: 10.0.1.105
 
   clickhouse:
     image: clickhouse/clickhouse-server:latest
@@ -79,7 +79,8 @@ services:
     env_file:
       - ./.env
     networks:
-      - github-trending-nw
+      github-trending-nw:
+        ipv4_address: 10.0.1.102
 
   redis:
     image: redis:alpine
@@ -94,7 +95,8 @@ services:
       timeout: 5s
       retries: 5
     networks:
-      - github-trending-nw
+      github-trending-nw:
+        ipv4_address: 10.0.1.100
 
   qdrant:
     image: qdrant/qdrant:latest
@@ -105,14 +107,18 @@ services:
     volumes:
       - ./data/qdrant:/qdrant/storage
     networks:
-      - github-trending-nw
+      github-trending-nw:
+        ipv4_address: 10.0.1.104
         
   dozzle:
     image: amir20/dozzle:latest
+    ports:
+      - target: 8080
+        published: 8888
+        protocol: tcp
+        mode: host
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-    ports:
-      - "8888:8080"
     environment:
     # Uncomment to enable container actions (stop, start, restart). See https://dozzle.dev/guide/actions
      - DOZZLE_ENABLE_ACTIONS=true
@@ -123,7 +129,12 @@ services:
     # Uncomment to enable authentication. See https://dozzle.dev/guide/authentication
     # - DOZZLE_AUTH_PROVIDER=simple
     networks:
-      - github-trending-nw
+      github-trending-nw:
+        ipv4_address: 10.0.1.103
+    deploy:
+      placement:
+        constraints:
+          - node.role == manager
 
   # --- APPLICATION SERVICES (Golang) ---
 
@@ -208,9 +219,12 @@ services:
       context: .
       dockerfile: ./cmd/api/Dockerfile
     image: github-trending/api-server
-    container_name: api-server
     ports:
-      - "8080:8080"
+      - target: 8080
+        published: 8080
+        protocol: tcp
+        mode: host
+    container_name: api-server
     depends_on:
       - rabbitmq
       - postgres
@@ -221,7 +235,12 @@ services:
     env_file:
       - ./.env
     networks:
-      - github-trending-nw
+      github-trending-nw:
+        ipv4_address: 10.0.1.103
+    deploy:
+      placement:
+        constraints:
+          - node.role == manager
 
   embedding-service:
     build:
@@ -304,3 +323,6 @@ volumes:
 networks:
   github-trending-nw:
     driver: overlay
+    ipam:
+      config:
+        - subnet: 10.0.1.0/24

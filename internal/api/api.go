@@ -16,6 +16,8 @@ import (
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"crypto/sha256"
+	"github.com/golang/snappy"
 	"github.com/redis/go-redis/v9"
 	"github.com/teomiscia/github-trending/internal/config"
 	"github.com/teomiscia/github-trending/internal/database"
@@ -32,7 +34,7 @@ func NewServer(cfg *config.Config, redisClient *redis.Client, pgdb *database.Pos
 
 	router.GET("/retrieveList", handleRetrieveList(cfg, redisClient, pgdb, chdb))
 	router.POST("/trackOpenRepository", handleTrackOpenRepository(cfg, redisClient, pgdb))
-	router.GET("/getReadme", handleGetReadme(cfg, minioConnection))
+	router.GET("/getReadme", handleGetReadme(cfg, redisClient, minioConnection))
 
 	return router
 }
@@ -45,10 +47,20 @@ func errorResponse(c *gin.Context, code int, genericMessage string, err error, d
 	c.JSON(code, response)
 }
 
+func compress(data []byte) []byte {
+	return snappy.Encode(nil, data)
+}
+
+func decompress(data []byte) ([]byte, error) {
+	return snappy.Decode(nil, data)
+}
+
 func handleRetrieveList(cfg *config.Config, redisClient *redis.Client, pgdb *database.PostgresConnection, chdb *database.ClickHouseConnection) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		sessionID := c.Query("sessionId")
-		if sessionID == "" {
+		originalSessionID := c.Query("sessionId")
+		isNewSession := originalSessionID == ""
+		sessionID := originalSessionID
+		if isNewSession {
 			sessionID = uuid.New().String()
 		}
 
@@ -56,99 +68,100 @@ func handleRetrieveList(cfg *config.Config, redisClient *redis.Client, pgdb *dat
 		if len(languages) == 1 && languages[0] == "" {
 			languages = []string{}
 		}
+		sort.Strings(languages)
+
 		tags := strings.Split(c.Query("tags"), ",")
 		if len(tags) == 1 && tags[0] == "" {
 			tags = []string{}
 		}
+		sort.Strings(tags)
 
 		topics := strings.Split(c.Query("topics"), ",")
 		if len(topics) == 1 && topics[0] == "" {
 			topics = []string{}
 		}
+		sort.Strings(topics)
+
+		pageStr := c.Query("page")
+		page, _ := strconv.Atoi(pageStr)
+
+		// --- Overall Response Cache Check ---
+		buildCacheKey := func(sID string) string {
+			keyBuilder := strings.Builder{}
+			keyBuilder.WriteString(fmt.Sprintf("retrieveList:%s:%s:%s:%s:%s", sID, strings.Join(languages, ","), strings.Join(tags, ","), strings.Join(topics, ","), pageStr))
+			return fmt.Sprintf("cache:%x", sha256.Sum256([]byte(keyBuilder.String())))
+		}
+
+		cacheKey := buildCacheKey(originalSessionID)
+		cachedResponse, err := redisClient.Get(c.Request.Context(), cacheKey).Result()
+		if err == nil {
+			decompressed, err := decompress([]byte(cachedResponse))
+			if err == nil {
+				var response gin.H
+				if err := json.Unmarshal(decompressed, &response); err == nil {
+					if isNewSession {
+						response["sessionId"] = sessionID
+					}
+					c.JSON(http.StatusOK, response)
+					return
+				}
+			}
+		}
+		// --- End of Cache Check ---
 
 		var recommendedRepoIDs []int64
 
 		// 1. Query the repository_views table for user history
-		userHistoryRepoIDs, err := pgdb.GetRecentClickedRepositoryIDs(sessionID, 15) // Get last 15 clicked repos
+		userHistoryRepoIDs, err := pgdb.GetRecentClickedRepositoryIDs(sessionID, 15)
 		if err != nil {
 			log.Printf("Failed to get user history from Postgres: %v", err)
-			// Fallback to generic trending if history fails
-			trendingRepoIDs, err := chdb.GetTrendingRepositoryIDsByGrowth(30) // Using 7 days as default
-			if err != nil {
-				errorResponse(c, http.StatusInternalServerError, "Failed to retrieve trending repository list from ClickHouse", err, cfg.Debug)
-				return
-			}
-			// If filters are provided, filter the list of IDs
-			if len(languages) > 0 || len(tags) > 0 || len(topics) > 0 {
-				filteredRepoIDs, err := pgdb.FilterRepositoryIDs(trendingRepoIDs, languages, tags, topics)
-				if err != nil {
-					errorResponse(c, http.StatusInternalServerError, "Failed to filter repository list", err, cfg.Debug)
-					return
+		}
+
+		if len(userHistoryRepoIDs) == 0 {
+			// --- Generic Trending Logic ---
+			trendingCacheKey := "trending_repo_ids_by_growth:30"
+			cachedTrending, err := redisClient.Get(c.Request.Context(), trendingCacheKey).Result()
+			if err == nil {
+				decompressed, err := decompress([]byte(cachedTrending))
+				if err == nil {
+					json.Unmarshal(decompressed, &recommendedRepoIDs)
 				}
-				recommendedRepoIDs = filteredRepoIDs
-			} else {
-				recommendedRepoIDs = trendingRepoIDs
-			}
-		} else if len(userHistoryRepoIDs) == 0 {
-			// 2. If no user history exists, fall back to generic trending based on ClickHouse growth
-			trendingRepoIDs, err := chdb.GetTrendingRepositoryIDsByGrowth(30) // Using 7 days as default
-			if err != nil {
-				errorResponse(c, http.StatusInternalServerError, "Failed to retrieve trending repository list from ClickHouse", err, cfg.Debug)
-				return
 			}
 
-			// If filters are provided, filter the list of IDs
-			if len(languages) > 0 || len(tags) > 0 || len(topics) > 0 {
-				filteredRepoIDs, err := pgdb.FilterRepositoryIDs(trendingRepoIDs, languages, tags, topics)
+			if len(recommendedRepoIDs) == 0 {
+				trendingRepoIDs, err := chdb.GetTrendingRepositoryIDsByGrowth(30)
 				if err != nil {
-					errorResponse(c, http.StatusInternalServerError, "Failed to filter repository list", err, cfg.Debug)
+					errorResponse(c, http.StatusInternalServerError, "Failed to retrieve trending repository list from ClickHouse", err, cfg.Debug)
 					return
 				}
-				recommendedRepoIDs = filteredRepoIDs
-			} else {
 				recommendedRepoIDs = trendingRepoIDs
+				jsonBytes, err := json.Marshal(recommendedRepoIDs)
+				if err == nil {
+					redisClient.Set(c.Request.Context(), trendingCacheKey, compress(jsonBytes), 10*time.Minute)
+				}
 			}
 		} else {
-			// 3. If user history exists, aggregate similar repositories
+			// --- Personalized Recommendation Logic ---
 			candidateScores := make(map[int64]float64)
 			for _, historyRepoID := range userHistoryRepoIDs {
-				redisKey := fmt.Sprintf("similar:%d", historyRepoID)
-
-				// Try to get from Redis first
-				similarRepos, err := redisClient.ZRevRangeWithScores(context.Background(), redisKey, 0, 49).Result()
-				if err != nil || len(similarRepos) == 0 {
-					// If not in Redis, get from PostgreSQL
-					jsonData, err := pgdb.GetRepositorySimilarity(historyRepoID)
-					if err != nil {
-						log.Printf("Failed to get similar repos from Postgres for %d: %v", historyRepoID, err)
-						continue
-					}
-
-					if jsonData != nil {
-						var zMembers []redis.Z
-						if err := json.Unmarshal(jsonData, &zMembers); err != nil {
-							log.Printf("Failed to unmarshal similarity data for repo %d: %v", historyRepoID, err)
-							continue
-						}
-
-						// Add to Redis with a 24-hour TTL
-						_, err = redisClient.ZAdd(context.Background(), redisKey, zMembers...).Result()
-						if err != nil {
-							log.Printf("Failed to store similarity list for repo %d in Redis: %v", historyRepoID, err)
-						}
-						redisClient.Expire(context.Background(), redisKey, 24*time.Hour)
-
-						similarRepos, _ = redisClient.ZRevRangeWithScores(context.Background(), redisKey, 0, 49).Result()
-					}
+				similarRepos, err := pgdb.GetRepositorySimilarity(historyRepoID)
+				if err != nil {
+					log.Printf("Failed to get similar repos for %d: %v", historyRepoID, err)
+					continue
 				}
 
-				for _, z := range similarRepos {
+				var zMembers []redis.Z
+				if err := json.Unmarshal(similarRepos, &zMembers); err != nil {
+					log.Printf("Failed to unmarshal similarity data for repo %d: %v", historyRepoID, err)
+					continue
+				}
+
+				for _, z := range zMembers {
 					repoID, _ := strconv.ParseInt(fmt.Sprintf("%.0f", z.Member), 10, 64)
 					candidateScores[repoID] += z.Score
 				}
 			}
 
-			// Convert map to slice for sorting
 			type scoredRepo struct {
 				ID    int64
 				Score float64
@@ -157,24 +170,44 @@ func handleRetrieveList(cfg *config.Config, redisClient *redis.Client, pgdb *dat
 			for id, score := range candidateScores {
 				scoredRepos = append(scoredRepos, scoredRepo{ID: id, Score: score})
 			}
-
-			// Sort by score in descending order
 			sort.Slice(scoredRepos, func(i, j int) bool {
 				return scoredRepos[i].Score > scoredRepos[j].Score
 			})
-
 			for _, sr := range scoredRepos {
 				recommendedRepoIDs = append(recommendedRepoIDs, sr.ID)
 			}
 		}
 
-		// Filter out repositories that have already been seen in this session
-		seenRepoIDs, err := redisClient.SMembers(context.Background(), sessionID).Result()
-		if err != nil {
-			errorResponse(c, http.StatusInternalServerError, "Failed to retrieve seen repositories", err, cfg.Debug)
-			return
+		// Filter if needed
+		if len(languages) > 0 || len(tags) > 0 || len(topics) > 0 {
+			keyBuilder := strings.Builder{}
+			for _, id := range recommendedRepoIDs {
+				keyBuilder.WriteString(strconv.FormatInt(id, 10))
+			}
+			filterCacheKey := fmt.Sprintf("filtered_ids:%x:%s:%s:%s", sha256.Sum256([]byte(keyBuilder.String())), strings.Join(languages, ","), strings.Join(tags, ","), strings.Join(topics, ","))
+
+			cachedFiltered, err := redisClient.Get(c.Request.Context(), filterCacheKey).Result()
+			if err == nil {
+				decompressed, err := decompress([]byte(cachedFiltered))
+				if err == nil {
+					json.Unmarshal(decompressed, &recommendedRepoIDs)
+				}
+			} else {
+				filteredRepoIDs, err := pgdb.FilterRepositoryIDs(recommendedRepoIDs, languages, tags, topics)
+				if err != nil {
+					errorResponse(c, http.StatusInternalServerError, "Failed to filter repository list", err, cfg.Debug)
+					return
+				}
+				recommendedRepoIDs = filteredRepoIDs
+				jsonBytes, err := json.Marshal(recommendedRepoIDs)
+				if err == nil {
+					redisClient.Set(c.Request.Context(), filterCacheKey, compress(jsonBytes), 10*time.Minute)
+				}
+			}
 		}
 
+		// Filter out seen repos
+		seenRepoIDs, _ := redisClient.SMembers(context.Background(), sessionID).Result()
 		seenRepoIDMap := make(map[int64]bool)
 		for _, idStr := range seenRepoIDs {
 			id, _ := strconv.ParseInt(idStr, 10, 64)
@@ -188,11 +221,7 @@ func handleRetrieveList(cfg *config.Config, redisClient *redis.Client, pgdb *dat
 			}
 		}
 
-		// Paginate the results
-		page := 0
-		if pageStr := c.Query("page"); pageStr != "" {
-			page, _ = strconv.Atoi(pageStr)
-		}
+		// Paginate
 		pageSize := 50
 		start := page * pageSize
 		end := start + pageSize
@@ -203,73 +232,71 @@ func handleRetrieveList(cfg *config.Config, redisClient *redis.Client, pgdb *dat
 		} else {
 			finalRepoIDs = finalRepoIDs[start:end]
 		}
-		log.Printf("Final repo IDs after pagination: %d", len(finalRepoIDs))
 
-		// Fetch full repository data
 		repositories, err := pgdb.GetRepositoriesDataByIDs(finalRepoIDs)
 		if err != nil {
 			errorResponse(c, http.StatusInternalServerError, "Failed to retrieve full repository data", err, cfg.Debug)
 			return
 		}
 
-		// Create a new response structure to control the output
 		type RepositoryResponse struct {
-			Repository          models.Repository      `json:"repository"`
-			Owner               models.Owner           `json:"owner"`
-			Stats               *models.RepositoryStat `json:"stats,omitempty"`
-			TotalViews          int                    `json:"total_views"`
-			RecentViews         int                    `json:"recent_views"`
-			TrendingScore       float64                `json:"trending_score"`
-			IsTrending          bool                   `json:"is_trending"`
-			LastCrawledAt       time.Time              `json:"last_crawled_at"`
-			LastUpdatedAt       time.Time              `json:"last_updated_at"`
-			Crawled             bool                   `json:"crawled"`
-			ProgrammingLanguage string                 `json:"programming_language"`
-			SpokenLanguage      string                 `json:"spoken_language"`
-			PopularityScore     float64                `json:"popularity_score"`
-			GrowthScore         float64                `json:"growth_score"`
-			ProjectHealth       float64                `json:"project_health"`
-			SimilarityScore     float64                `json:"similarity_score"`
+			Repository models.Repository      `json:"repository"`
+			Owner      models.Owner           `json:"owner"`
+			Stats      *models.RepositoryStat `json:"stats,omitempty"`
 		}
 
 		responseRepos := make([]RepositoryResponse, len(repositories))
-
-		// Add stats from ClickHouse and filter fields
 		for i, repo := range repositories {
-			stats, err := chdb.GetRepositoryStats(int64(repo.Repository.ID))
-			if err != nil {
-				log.Printf("Failed to get stats for repository %d from ClickHouse: %v", repo.Repository.ID, err)
-			}
-
 			var lastStat *models.RepositoryStat
-			if len(stats) > 0 {
-				lastStat = &stats[len(stats)-1]
+			statsCacheKey := fmt.Sprintf("repo_stats:%d", repo.Repository.ID)
+			cachedStats, err := redisClient.Get(c.Request.Context(), statsCacheKey).Result()
+			if err == nil {
+				decompressed, err := decompress([]byte(cachedStats))
+				if err == nil {
+					var stats []models.RepositoryStat
+					if json.Unmarshal(decompressed, &stats) == nil && len(stats) > 0 {
+						lastStat = &stats[len(stats)-1]
+					}
+				}
+			} else {
+				stats, err := chdb.GetRepositoryStats(int64(repo.Repository.ID))
+				if err != nil {
+					log.Printf("Failed to get stats for repository %d from ClickHouse: %v", repo.Repository.ID, err)
+				} else {
+					if len(stats) > 0 {
+						lastStat = &stats[len(stats)-1]
+					}
+					jsonBytes, err := json.Marshal(stats)
+					if err == nil {
+						redisClient.Set(c.Request.Context(), statsCacheKey, compress(jsonBytes), 1*time.Hour)
+					}
+				}
 			}
 
 			responseRepos[i] = RepositoryResponse{
-				Repository:          repo.Repository,
-				Owner:               repo.Owner,
-				Stats:               lastStat,
-				TotalViews:          repo.TotalViews,
-				RecentViews:         repo.RecentViews,
-				TrendingScore:       repo.TrendingScore,
-				IsTrending:          repo.IsTrending,
-				LastCrawledAt:       repo.LastCrawledAt,
-				LastUpdatedAt:       repo.LastUpdatedAt,
-				Crawled:             repo.Crawled,
-				ProgrammingLanguage: repo.ProgrammingLanguage,
-				SpokenLanguage:      repo.SpokenLanguage,
-				PopularityScore:     repo.PopularityScore,
-				GrowthScore:         repo.GrowthScore,
-				ProjectHealth:       repo.ProjectHealth,
-				SimilarityScore:     repo.SimilarityScore,
+				Repository: repo.Repository,
+				Owner:      repo.Owner,
+				Stats:      lastStat,
 			}
 		}
 
-		c.JSON(http.StatusOK, gin.H{
+		// --- Cache Final Response ---
+		finalResponse := gin.H{
 			"sessionId":    sessionID,
 			"repositories": responseRepos,
-		})
+		}
+		jsonResponse, err := json.Marshal(finalResponse)
+		if err == nil {
+			compressedResponse := compress(jsonResponse)
+			// Cache for the actual session ID (new or existing)
+			redisClient.Set(c.Request.Context(), buildCacheKey(sessionID), compressedResponse, 5*time.Minute)
+			// If it was a new session, also cache for the empty session ID to serve subsequent initial requests
+			if isNewSession {
+				redisClient.Set(c.Request.Context(), cacheKey, compressedResponse, 5*time.Minute)
+			}
+		}
+
+		c.JSON(http.StatusOK, finalResponse)
 	}
 }
 
@@ -297,12 +324,23 @@ func handleTrackOpenRepository(cfg *config.Config, redisClient *redis.Client, pg
 	}
 }
 
-func handleGetReadme(cfg *config.Config, minioConnection *database.MinioConnection) gin.HandlerFunc {
+func handleGetReadme(cfg *config.Config, redisClient *redis.Client, minioConnection *database.MinioConnection) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		repoID := c.Query("repoId")
 		if repoID == "" {
 			errorResponse(c, http.StatusBadRequest, "repoId query parameter is required", nil, cfg.Debug)
 			return
+		}
+
+		// --- Cache Check ---
+		cacheKey := fmt.Sprintf("readme_html:%s", repoID)
+		cachedHTML, err := redisClient.Get(c.Request.Context(), cacheKey).Result()
+		if err == nil {
+			decompressed, err := decompress([]byte(cachedHTML))
+			if err == nil {
+				c.Data(http.StatusOK, "text/html; charset=utf-8", decompressed)
+				return
+			}
 		}
 
 		// Construct the object name for MinIO
@@ -343,6 +381,15 @@ func handleGetReadme(cfg *config.Config, minioConnection *database.MinioConnecti
 			return
 		}
 
-		c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(result["html"]))
+		htmlContent := []byte(result["html"])
+
+		// --- Cache Result ---
+		compressedHTML := compress(htmlContent)
+		err = redisClient.Set(c.Request.Context(), cacheKey, compressedHTML, 24*time.Hour).Err()
+		if err != nil {
+			log.Printf("Failed to cache README for repo %s: %v", repoID, err)
+		}
+
+		c.Data(http.StatusOK, "text/html; charset=utf-8", htmlContent)
 	}
 }

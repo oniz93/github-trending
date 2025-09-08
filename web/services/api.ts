@@ -1,7 +1,7 @@
 import axios from 'axios';
 import { FeedProject, RepositoryResponse } from '../types/repository';
 
-const API_BASE_URL = 'http://192.168.1.106:8080'; // Using a placeholder
+const API_BASE_URL = 'https://api.gitfinder.dev';
 
 export const getRepositories = async (page: number, sessionId?: string): Promise<{repositories: FeedProject[], sessionId: string}> => {
   try {

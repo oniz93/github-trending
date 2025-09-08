@@ -3,6 +3,7 @@ package database
 import (
 	"database/sql"
 	"fmt"
+	"net/url"
 	"strconv"
 	"time"
 
@@ -24,7 +25,8 @@ type ClickHouseConnection struct {
 
 // NewClickHouseConnection creates a new connection to the ClickHouse database.
 func NewClickHouseConnection(host, port, user, password, database string) (*ClickHouseConnection, error) {
-	connect, err := sql.Open("clickhouse", fmt.Sprintf("tcp://%s:%s?username=%s&password=%s&database=%s", host, port, user, password, database))
+	encodedPassword := url.QueryEscape(password)
+	connect, err := sql.Open("clickhouse", fmt.Sprintf("tcp://%s:%s?username=%s&password=%s&database=%s", host, port, user, encodedPassword, database))
 	if err != nil {
 		return nil, err
 	}
