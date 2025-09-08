@@ -1,7 +1,7 @@
 {
   "expo": {
-    "name": "web",
-    "slug": "web",
+    "name": "GitFinder BETA",
+    "slug": "gitfinder-beta",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",

@@ -18,7 +18,7 @@ const FeedScreen = () => {
   const [projects, setProjects] = useState<FeedProject[]>([
     {
       id: '-1',
-      name: 'Welcome to GitTok',
+      name: 'Welcome to GitFinder BETA',
       description: 'Discover amazing open source projects in a new way.',
       type: 'message',
     } as FeedProject,

@@ -42,9 +42,9 @@ const SpecialMessageCard: React.FC<SpecialMessageCardProps> = ({ project }) => {
             <>
               <Text style={styles.title}>{project.name}</Text>
               <Text style={styles.description}>{project.description}</Text>
-              <TouchableOpacity style={styles.actionButton}>
+              {/* <TouchableOpacity style={styles.actionButton}>
                 <Text style={styles.actionButtonText}>Learn More</Text>
-              </TouchableOpacity>
+              </TouchableOpacity> */}
             </>
           )}
         </View>
