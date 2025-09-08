@@ -95,6 +95,11 @@ To run the frontend application for development:
     # For Android
     npm run android
     ```
+4. **Build the production**
+
+    ```bash
+    npx expo export -p web
+    ```
 
 ### Managing the Stack
 
