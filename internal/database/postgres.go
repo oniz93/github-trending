@@ -105,7 +105,7 @@ func (pc *PostgresConnection) GetTrendingRepositoryIDs(languages, tags, topics, 
 		jsonBytes, err := json.Marshal(ids)
 		if err == nil {
 			compressed := compress(jsonBytes)
-			pc.RedisClient.Set(context.Background(), key, compressed, 10*time.Minute)
+			pc.RedisClient.Set(context.Background(), key, compressed, 24*time.Hour)
 		}
 
 		return ids, nil
@@ -425,7 +425,7 @@ func (pc *PostgresConnection) GetRepositoryByID(repoID int64) (models.Repository
 		jsonBytes, err := json.Marshal(repo)
 		if err == nil {
 			compressed := compress(jsonBytes)
-			pc.RedisClient.Set(context.Background(), key, compressed, 1*time.Hour)
+			pc.RedisClient.Set(context.Background(), key, compressed, 12*time.Hour)
 		}
 	}
 
@@ -606,7 +606,7 @@ func (pc *PostgresConnection) GetRepositoryIDs(limit, offset int) ([]int64, erro
 		jsonBytes, err := json.Marshal(ids)
 		if err == nil {
 			compressed := compress(jsonBytes)
-			pc.RedisClient.Set(context.Background(), key, compressed, 1*time.Hour) // Cache for 1 hour
+			pc.RedisClient.Set(context.Background(), key, compressed, 12*time.Hour) // Cache for 12 hour
 		}
 	}
 
@@ -699,7 +699,7 @@ func (pc *PostgresConnection) GetRepositoriesDataByIDs(repoIDs []int64) ([]model
 				jsonBytes, err := json.Marshal(dbRes)
 				if err == nil {
 					compressed := compress(jsonBytes)
-					pc.RedisClient.Set(context.Background(), key, compressed, 1*time.Hour)
+					pc.RedisClient.Set(context.Background(), key, compressed, 12*time.Hour)
 				}
 			}
 		}

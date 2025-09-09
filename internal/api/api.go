@@ -137,7 +137,7 @@ func handleRetrieveList(cfg *config.Config, redisClient *redis.Client, pgdb *dat
 				recommendedRepoIDs = trendingRepoIDs
 				jsonBytes, err := json.Marshal(recommendedRepoIDs)
 				if err == nil {
-					redisClient.Set(c.Request.Context(), trendingCacheKey, compress(jsonBytes), 10*time.Minute)
+					redisClient.Set(c.Request.Context(), trendingCacheKey, compress(jsonBytes), 24*time.Hour)
 				}
 			}
 		} else {
@@ -201,7 +201,7 @@ func handleRetrieveList(cfg *config.Config, redisClient *redis.Client, pgdb *dat
 				recommendedRepoIDs = filteredRepoIDs
 				jsonBytes, err := json.Marshal(recommendedRepoIDs)
 				if err == nil {
-					redisClient.Set(c.Request.Context(), filterCacheKey, compress(jsonBytes), 10*time.Minute)
+					redisClient.Set(c.Request.Context(), filterCacheKey, compress(jsonBytes), 24*time.Hour)
 				}
 			}
 		}
@@ -268,7 +268,7 @@ func handleRetrieveList(cfg *config.Config, redisClient *redis.Client, pgdb *dat
 					}
 					jsonBytes, err := json.Marshal(stats)
 					if err == nil {
-						redisClient.Set(c.Request.Context(), statsCacheKey, compress(jsonBytes), 1*time.Hour)
+						redisClient.Set(c.Request.Context(), statsCacheKey, compress(jsonBytes), 12*time.Hour)
 					}
 				}
 			}
@@ -289,10 +289,10 @@ func handleRetrieveList(cfg *config.Config, redisClient *redis.Client, pgdb *dat
 		if err == nil {
 			compressedResponse := compress(jsonResponse)
 			// Cache for the actual session ID (new or existing)
-			redisClient.Set(c.Request.Context(), buildCacheKey(sessionID), compressedResponse, 5*time.Minute)
+			redisClient.Set(c.Request.Context(), buildCacheKey(sessionID), compressedResponse, 24*time.Hour)
 			// If it was a new session, also cache for the empty session ID to serve subsequent initial requests
 			if isNewSession {
-				redisClient.Set(c.Request.Context(), cacheKey, compressedResponse, 5*time.Minute)
+				redisClient.Set(c.Request.Context(), cacheKey, compressedResponse, 24*time.Hour)
 			}
 		}
 
