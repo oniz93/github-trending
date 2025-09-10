@@ -1,7 +1,9 @@
 import axios from 'axios';
 import { FeedProject, RepositoryResponse } from '../types/repository';
 
-const API_BASE_URL = 'https://api.gitfinder.dev';
+import Constants from 'expo-constants';
+
+const API_BASE_URL = Constants.expoConfig?.extra?.EXPO_PUBLIC_API_URL as string;
 
 export const getRepositories = async (page: number, sessionId?: string): Promise<{repositories: FeedProject[], sessionId: string}> => {
   try {

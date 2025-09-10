@@ -182,7 +182,7 @@ const FeedScreen = () => {
         pagingEnabled
         showsVerticalScrollIndicator={false}
         onEndReached={() => loadRepositories(page, sessionId)}
-        onEndReachedThreshold={0.5}
+                onEndReachedThreshold={0.9}
         ListFooterComponent={loading && !initialLoading ? <ActivityIndicator size="large" color="#ffffff" /> : null}
         getItemLayout={(data, index) => ({ length: height, offset: height * index, index })}
         onViewableItemsChanged={onViewableItemsChanged}
