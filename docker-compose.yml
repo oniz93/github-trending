@@ -130,7 +130,7 @@ services:
     # - DOZZLE_AUTH_PROVIDER=simple
     networks:
       github-trending-nw:
-        ipv4_address: 10.0.1.103
+        ipv4_address: 10.0.1.106
     deploy:
       placement:
         constraints:
@@ -306,6 +306,21 @@ services:
       - postgres
       - qdrant
       - redis
+    restart: unless-stopped
+    env_file:
+      - ./.env
+    networks:
+      - github-trending-nw
+
+  social-poster:
+    build:
+      context: .
+      dockerfile: ./cmd/social-poster/Dockerfile
+    image: github-trending/social-poster
+    container_name: social-poster
+    depends_on:
+      - postgres
+      - clickhouse
     restart: unless-stopped
     env_file:
       - ./.env

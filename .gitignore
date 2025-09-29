@@ -1,6 +1,7 @@
 /data/
 /.idea/
 .env
+.env.postiz
 trigger_discovery
 vendor
 gittok.dev-main

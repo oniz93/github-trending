@@ -63,7 +63,7 @@ const FeedScreen = () => {
       apologyTimerRef.current = setTimeout(() => {
         setShowApology(true);
       }, 10000);
-      await loadRepositories(0, storedSessionId || undefined);
+      await loadRepositories(0, storedSessionId || '');
       setInitialLoading(false);
       if (apologyTimerRef.current) {
         clearTimeout(apologyTimerRef.current);
@@ -85,7 +85,7 @@ const FeedScreen = () => {
     }
   }, [page, projects, prefetchReadmes]);
 
-  const loadRepositories = async (currentPage: number, currentSessionId?: string) => {
+  const loadRepositories = async (currentPage: number, currentSessionId: string) => {
     if (loading) return;
     setLoading(true);
     try {
@@ -93,7 +93,7 @@ const FeedScreen = () => {
       
       setProjects(prev => [...prev, ...newRepositories]);
 
-      if (newSessionId && newSessionId !== currentSessionId) {
+      if (newSessionId) {
         setSessionId(newSessionId);
         await AsyncStorage.setItem('sessionId', newSessionId);
       }
@@ -181,7 +181,7 @@ const FeedScreen = () => {
         keyExtractor={(item) => item.id.toString()}
         pagingEnabled
         showsVerticalScrollIndicator={false}
-        onEndReached={() => loadRepositories(page, sessionId)}
+        onEndReached={() => loadRepositories(page, sessionId || '')}
                 onEndReachedThreshold={0.9}
         ListFooterComponent={loading && !initialLoading ? <ActivityIndicator size="large" color="#ffffff" /> : null}
         getItemLayout={(data, index) => ({ length: height, offset: height * index, index })}

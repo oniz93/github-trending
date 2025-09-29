@@ -36,6 +36,10 @@ type Config struct {
 	EmbeddingApiMaxInstances int
 	EmbeddingApiIdleTimeout  int
 	Debug                    bool
+	TwitterApiKey            string
+	TwitterApiSecretKey      string
+	TwitterAccessToken       string
+	TwitterAccessSecret      string
 }
 
 // ParseDuration parses a duration string with support for "months".
@@ -120,6 +124,10 @@ func Load() (*Config, error) {
 		EmbeddingApiMaxInstances: embeddingApiMaxInstances,
 		EmbeddingApiIdleTimeout:  embeddingApiIdleTimeout,
 		Debug:                    debug,
+		TwitterApiKey:            os.Getenv("TWITTER_API_KEY"),
+		TwitterApiSecretKey:      os.Getenv("TWITTER_API_SECRET_KEY"),
+		TwitterAccessToken:       os.Getenv("TWITTER_ACCESS_TOKEN"),
+		TwitterAccessSecret:      os.Getenv("TWITTER_ACCESS_SECRET"),
 	}
 
 	if os.Getenv("LOCAL_ENV") == "true" {

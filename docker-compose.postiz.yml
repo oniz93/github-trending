@@ -1,0 +1,135 @@
+services:
+  postiz:
+    image: ghcr.io/gitroomhq/postiz-app:latest
+    container_name: postiz
+    restart: always
+    volumes:
+      - ./data/postiz/config:/config/
+      - ./data/postiz/uploads:/uploads/
+    ports:
+      - 5000:5000
+    environment:
+      # === Required Settings
+      MAIN_URL: "https://postiz.gitfinder.dev"
+      FRONTEND_URL: "https://postiz.gitfinder.dev"
+      NEXT_PUBLIC_BACKEND_URL: "https://postiz.gitfinder.dev/api"
+      JWT_SECRET: "828a992c367fbe85988e99d64c3b5e3ac1427f5766aff20c9ca991594a6c997716c1a64495540addd3b0f5d1"
+      DATABASE_URL: "postgresql://teomiscia:QPwbWHc5VF8ALaV7MVbaa5UjvzRHPpe3@postiz-postgres:5432/postiz"
+      REDIS_URL: "redis://:gmRGQNjXshNWhFnQ6tYVYKHMXBAeBAHA@postiz-redis:6379"
+      BACKEND_INTERNAL_URL: "http://localhost:3000"
+      IS_GENERAL: "true"
+      DISABLE_REGISTRATION: "false"
+
+      # === Storage Settings
+      STORAGE_PROVIDER: "local"
+      UPLOAD_DIRECTORY: "/uploads"
+      NEXT_PUBLIC_UPLOAD_DIRECTORY: "/uploads"
+
+      # === Social Media API Settings
+      X_API_KEY: "ZcYTMhy68WE0k1bKEnNUK0gWP"
+      X_API_SECRET: "FeD2po7x4NmWr1e0s4I3RZPhN7bnCbqP3SxZRxh5u1IcBD19KT"
+      LINKEDIN_CLIENT_ID: ""
+      LINKEDIN_CLIENT_SECRET: ""
+      REDDIT_CLIENT_ID: ""
+      REDDIT_CLIENT_SECRET: ""
+      GITHUB_CLIENT_ID: ""
+      GITHUB_CLIENT_SECRET: ""
+      BEEHIIVE_API_KEY: ""
+      BEEHIIVE_PUBLICATION_ID: ""
+      THREADS_APP_ID: ""
+      THREADS_APP_SECRET: ""
+      FACEBOOK_APP_ID: ""
+      FACEBOOK_APP_SECRET: ""
+      YOUTUBE_CLIENT_ID: ""
+      YOUTUBE_CLIENT_SECRET: ""
+      TIKTOK_CLIENT_ID: ""
+      TIKTOK_CLIENT_SECRET: ""
+      PINTEREST_CLIENT_ID: ""
+      PINTEREST_CLIENT_SECRET: ""
+      DRIBBBLE_CLIENT_ID: ""
+      DRIBBBLE_CLIENT_SECRET: ""
+      DISCORD_CLIENT_ID: ""
+      DISCORD_CLIENT_SECRET: ""
+      DISCORD_BOT_TOKEN_ID: ""
+      SLACK_ID: ""
+      SLACK_SECRET: ""
+      SLACK_SIGNING_SECRET: ""
+      MASTODON_URL: "https://mastodon.social"
+      MASTODON_CLIENT_ID: ""
+      MASTODON_CLIENT_SECRET: ""
+
+      # === OAuth & Authentik Settings
+      NEXT_PUBLIC_POSTIZ_OAUTH_DISPLAY_NAME: "Authentik"
+      NEXT_PUBLIC_POSTIZ_OAUTH_LOGO_URL: "https://raw.githubusercontent.com/walkxcode/dashboard-icons/master/png/authentik.png"
+      POSTIZ_GENERIC_OAUTH: "false"
+      POSTIZ_OAUTH_URL: "https://auth.example.com"
+      POSTIZ_OAUTH_AUTH_URL: "https://auth.example.com/application/o/authorize"
+      POSTIZ_OAUTH_TOKEN_URL: "https://auth.example.com/application/o/token"
+      POSTIZ_OAUTH_USERINFO_URL: "https://authentik.example.com/application/o/userinfo"
+      POSTIZ_OAUTH_CLIENT_ID: ""
+      POSTIZ_OAUTH_CLIENT_SECRET: ""
+      # POSTIZ_OAUTH_SCOPE: "openid profile email"  # Optional=uncomment to override default scope
+
+      # === Misc Settings
+      OPENAI_API_KEY: ""
+      NEXT_PUBLIC_DISCORD_SUPPORT: ""
+      NEXT_PUBLIC_POLOTNO: ""
+      API_LIMIT: 30
+
+      # === Payment / Stripe Settings
+      FEE_AMOUNT: 0.05
+      STRIPE_PUBLISHABLE_KEY: ""
+      STRIPE_SECRET_KEY: ""
+      STRIPE_SIGNING_KEY: ""
+      STRIPE_SIGNING_KEY_CONNECT: ""
+    networks:
+      - postiz-network
+    depends_on:
+      - postiz-postgres
+      - postiz-redis
+ 
+  postiz-postgres:
+    image: postgres:17-alpine
+    container_name: postiz-postgres
+    restart: always
+    env_file:
+      - ./.env.postiz
+    volumes:
+      - ./data/postiz/postgres:/var/lib/postgresql/data
+    networks:
+      - postiz-network
+    healthcheck:
+      test: pg_isready -U teomiscia -d postiz
+      interval: 10s
+      timeout: 3s
+      retries: 3
+  postiz-redis:
+    image: redis:7.2
+    container_name: postiz-redis
+    env_file:
+      - ./.env.postiz
+    restart: always
+    healthcheck:
+      test: redis-cli ping
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    volumes:
+      - ./data/postiz/redis:/data
+    networks:
+      - postiz-network
+ 
+ 
+volumes:
+  postgres-volume:
+  postiz-redis-data:
+  postiz-config:
+  postiz-uploads:
+ 
+networks:
+  postiz-network:
+    external: false
+    driver: overlay
+    ipam:
+      config:
+        - subnet: 10.0.2.0/24

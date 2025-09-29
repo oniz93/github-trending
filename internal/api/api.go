@@ -3,6 +3,8 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -15,9 +17,8 @@ import (
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
-	"crypto/sha256"
 	"github.com/golang/snappy"
+	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 	"github.com/teomiscia/github-trending/internal/config"
 	"github.com/teomiscia/github-trending/internal/database"
@@ -35,8 +36,65 @@ func NewServer(cfg *config.Config, redisClient *redis.Client, pgdb *database.Pos
 	router.GET("/retrieveList", handleRetrieveList(cfg, redisClient, pgdb, chdb))
 	router.POST("/trackOpenRepository", handleTrackOpenRepository(cfg, redisClient, pgdb))
 	router.GET("/getReadme", handleGetReadme(cfg, redisClient, minioConnection))
+	router.GET("/repository/:id", handleGetRepositoryDetails(cfg, redisClient, pgdb, chdb))
 
 	return router
+}
+
+func handleGetRepositoryDetails(cfg *config.Config, redisClient *redis.Client, pgdb *database.PostgresConnection, chdb *database.ClickHouseConnection) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		repoIDStr := c.Param("id")
+		repoID, err := strconv.ParseInt(repoIDStr, 10, 64)
+		if err != nil {
+			errorResponse(c, http.StatusBadRequest, "Invalid repository ID", err, cfg.Debug)
+			return
+		}
+
+		sessionID := c.Query("sessionId")
+		if sessionID == "" {
+			sessionID = uuid.New().String()
+		}
+
+		// Track the view first
+		if err := pgdb.TrackRepositoryView(sessionID, repoID); err != nil {
+			// Log the error but don't block the user
+			log.Printf("Failed to track repository view for repo %d: %v", repoID, err)
+		}
+		// Add the repository to the seen set in Redis
+		redisClient.SAdd(context.Background(), sessionID, fmt.Sprint(repoID))
+
+		repoData, err := pgdb.GetRepositoryByID(repoID)
+		if err != nil {
+			if err == sql.ErrNoRows {
+				errorResponse(c, http.StatusNotFound, "Repository not found", err, cfg.Debug)
+			} else {
+				errorResponse(c, http.StatusInternalServerError, "Failed to retrieve repository data", err, cfg.Debug)
+			}
+			return
+		}
+
+		latestStat, err := chdb.GetLatestRepositoryStat(repoID)
+		if err != nil {
+			// Log the error but don't block the user, stats are not critical
+			log.Printf("Failed to get latest stats for repo %d: %v", repoID, err)
+		}
+
+		type RepositoryDetailResponse struct {
+			SessionID  string                 `json:"sessionId"`
+			Repository models.Repository      `json:"repository"`
+			Owner      models.Owner           `json:"owner"`
+			Stats      *models.RepositoryStat `json:"stats,omitempty"`
+		}
+
+		response := RepositoryDetailResponse{
+			SessionID:  sessionID,
+			Repository: repoData,
+			Owner:      repoData.Owner,
+			Stats:      latestStat,
+		}
+
+		c.JSON(http.StatusOK, response)
+	}
 }
 
 func errorResponse(c *gin.Context, code int, genericMessage string, err error, debug bool) {
