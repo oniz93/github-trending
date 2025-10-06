@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { useLocalSearchParams, useRouter } from 'expo-router';
+import { useLocalSearchParams, useRouter, Head } from 'expo-router';
 import { View, Text, StyleSheet, ActivityIndicator, Platform, ScrollView, Button, Linking } from 'react-native';
 import { WebView } from 'react-native-webview';
 import { getRepository, fetchReadme } from '../../services/api';
@@ -45,8 +45,10 @@ const RepositoryScreen = () => {
     );
   }
 
+  const ogImage = `https://api.gitfinder.dev/api/og?id=${id}`;
+
   const renderReadme = () => {
-    const styles = `
+    const readmeStyles = `
       body {
         background-color: #0d1117;
         color: white;
@@ -74,15 +76,15 @@ const RepositoryScreen = () => {
     if (Platform.OS === 'web') {
       return (
         <iframe
-          srcDoc={`<style>${styles}</style><div class="markdown-body">${readme}</div>`}
-          style={{ width: '100%', height: '100vh', border: 'none' }}
+          srcDoc={`<style>${readmeStyles}</style><div class="markdown-body">${readme}</div>`}
+          style={{ width: '100%', height: '100%', border: 'none' }}
         />
       );
     } else {
       return (
         <WebView
             originWhitelist={['*']}
-            source={{ html: `<style>${styles}</style><div class="markdown-body">${readme}</div>` }}
+            source={{ html: `<style>${readmeStyles}</style><div class="markdown-body">${readme}</div>` }}
             style={styles.webview}
         />
       )
@@ -90,16 +92,30 @@ const RepositoryScreen = () => {
   }
 
   return (
-    <ScrollView style={styles.container}>
-      <View style={styles.header}>
-        <Button title="< Back" onPress={() => router.push('/')} />
-        <Text style={styles.title}>{repository.full_name}</Text>
-        <Button title="View on GitHub" onPress={() => Linking.openURL(repository.html_url)} />
-      </View>
-      <View style={styles.readmeContainer}>
-        {renderReadme()}
-      </View>
-    </ScrollView>
+    <>
+      <Head>
+        <title>{repository.full_name} - GitFinder</title>
+        <meta name="description" content={repository.description || ''} />
+        <meta property="og:title" content={repository.full_name} />
+        <meta property="og:description" content={repository.description || ''} />
+        <meta property="og:image" content={ogImage} />
+        <meta property="twitter:card" content="summary_large_image" />
+        <meta property="twitter:title" content={repository.full_name} />
+        <meta property="twitter:description" content={repository.description || ''} />
+        <meta property="twitter:image" content={ogImage} />
+      </Head>
+      <ScrollView style={styles.container} contentContainerStyle={{ flexGrow: 1 }}>
+        <View style={styles.header}>
+          <Button title="< Back" onPress={() => router.push('/')} />
+          <Text style={styles.title}>{repository.full_name}</Text>
+          <Button title="View on GitHub" onPress={() => Linking.openURL(repository.html_url)} />
+        </View>
+        <View style={styles.readmeContainer}>
+          {renderReadme()}
+        </View>
+      </ScrollView>
+    </>
+
   );
 };
 

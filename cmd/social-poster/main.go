@@ -79,17 +79,41 @@ func runPoster(pgConnection *database.PostgresConnection, chConnection *database
 		return
 	}
 
-	// Get data for the top trending repository
-	repo, err := pgConnection.GetRepositoryByID(trendingRepoIDs[0])
-	if err != nil {
-		log.Printf("Failed to get repository data for ID %d: %v", trendingRepoIDs[0], err)
-		return
-	}
+	for _, repoID := range trendingRepoIDs {
+		isPosted, err := pgConnection.IsRepositoryPosted(repoID)
+		if err != nil {
+			log.Printf("Failed to check if repository %d was posted: %v", repoID, err)
+			continue
+		}
 
-	// Post it
-	err = poster.Post(repo)
-	if err != nil {
-		log.Printf("Failed to post to social media: %v", err)
+		if isPosted {
+			log.Printf("Repository %d has already been posted. Skipping.", repoID)
+			continue
+		}
+
+		// Get data for the top trending repository
+		repo, err := pgConnection.GetRepositoryByID(repoID)
+		if err != nil {
+			log.Printf("Failed to get repository data for ID %d: %v", repoID, err)
+			continue
+		}
+
+		log.Printf("Attempting to post repository: %s", repo.FullName)
+		// Post it
+		err = poster.Post(repo)
+		if err != nil {
+			log.Printf("Failed to post to social media: %v", err)
+			continue
+		}
+
+		log.Printf("Successfully posted repository: %s", repo.FullName)
+		err = pgConnection.MarkRepositoryAsPosted(repoID)
+		if err != nil {
+			log.Printf("Failed to mark repository %d as posted: %v", repoID, err)
+		}
+
+		// Post only one repository per run
+		break
 	}
 
 	log.Println("Finished social posting cycle.")

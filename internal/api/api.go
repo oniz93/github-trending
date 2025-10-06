@@ -37,8 +37,38 @@ func NewServer(cfg *config.Config, redisClient *redis.Client, pgdb *database.Pos
 	router.POST("/trackOpenRepository", handleTrackOpenRepository(cfg, redisClient, pgdb))
 	router.GET("/getReadme", handleGetReadme(cfg, redisClient, minioConnection))
 	router.GET("/repository/:id", handleGetRepositoryDetails(cfg, redisClient, pgdb, chdb))
+	router.GET("/api/og", handleGenerateOGImage(cfg))
 
 	return router
+}
+
+func handleGenerateOGImage(cfg *config.Config) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		repoID := c.Query("id")
+		if repoID == "" {
+			errorResponse(c, http.StatusBadRequest, "id query parameter is required", nil, cfg.Debug)
+			return
+		}
+
+		ogImageServiceURL := "http://og-image-service:3000"
+
+		resp, err := http.Get(fmt.Sprintf("%s/?id=%s", ogImageServiceURL, repoID))
+		if err != nil {
+			errorResponse(c, http.StatusInternalServerError, "Failed to call OG image service", err, cfg.Debug)
+			return
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			bodyBytes, _ := io.ReadAll(resp.Body)
+			errorResponse(c, http.StatusInternalServerError, fmt.Sprintf("OG image service returned non-OK status: %d, body: %s", resp.StatusCode, string(bodyBytes)), nil, cfg.Debug)
+			return
+		}
+
+		c.Header("Content-Type", "image/png")
+		c.Header("Cache-Control", "public, max-age=86400") // Cache for 1 day
+		io.Copy(c.Writer, resp.Body)
+	}
 }
 
 func handleGetRepositoryDetails(cfg *config.Config, redisClient *redis.Client, pgdb *database.PostgresConnection, chdb *database.ClickHouseConnection) gin.HandlerFunc {

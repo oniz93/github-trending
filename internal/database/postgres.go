@@ -793,3 +793,20 @@ func (pc *PostgresConnection) getRepositoriesDataByIDsFromDB(repoIDs []int64) ([
 
 	return repositoriesData, nil
 }
+
+// IsRepositoryPosted checks if a repository has already been posted.
+func (pc *PostgresConnection) IsRepositoryPosted(repoID int64) (bool, error) {
+	var exists bool
+	err := pc.DB.QueryRow("SELECT EXISTS(SELECT 1 FROM posted_repositories WHERE repository_id = $1)", repoID).Scan(&exists)
+	if err != nil {
+		return false, err
+	}
+	return exists, nil
+}
+
+// MarkRepositoryAsPosted marks a repository as posted.
+func (pc *PostgresConnection) MarkRepositoryAsPosted(repoID int64) error {
+	_, err := pc.DB.Exec("INSERT INTO posted_repositories (repository_id) VALUES ($1) ON CONFLICT (repository_id) DO NOTHING", repoID)
+	return err
+}
+

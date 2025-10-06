@@ -296,6 +296,21 @@ services:
     networks:
       - github-trending-nw
 
+  og-image-service:
+    build:
+      context: .
+      dockerfile: ./cmd/og-image-service/Dockerfile
+    image: github-trending/og-image-service
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./web/dist/index.html:/app/index.html
+    depends_on:
+      - api-server
+    restart: unless-stopped
+    networks:
+      - github-trending-nw
+
   similarity-engine-service:
     build:
       context: .

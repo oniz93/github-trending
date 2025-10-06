@@ -79,3 +79,8 @@ CREATE TABLE IF NOT EXISTS repository_similarity (
     id BIGINT PRIMARY KEY,
     data JSONB NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS posted_repositories (
+    repository_id BIGINT PRIMARY KEY,
+    posted_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
