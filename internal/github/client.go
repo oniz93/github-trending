@@ -4,9 +4,10 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"time"
 
 	models "github.com/teomiscia/github-trending/internal/models"
@@ -40,6 +41,52 @@ func NewGitHubClient(token string, httpClient *http.Client) *GitHubClient {
 // SetBaseURL sets the base URL for the GitHub API client. Useful for testing.
 func (c *GitHubClient) SetBaseURL(url string) {
 	c.baseURL = url
+}
+
+// doGet performs a GET request against the GitHub API and returns the response
+// body. It applies standard headers, retries with exponential backoff when the
+// API rate limit is hit (HTTP 403), and enforces a small pause between
+// successful requests to stay well within the rate limit.
+func (c *GitHubClient) doGet(path string) ([]byte, error) {
+	backoff := 5 * time.Second
+	for {
+		req, err := http.NewRequest(http.MethodGet, c.baseURL+path, nil)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create request: %w", err)
+		}
+
+		req.Header.Set("Accept", "application/vnd.github.v3+json")
+		if c.token != "" {
+			req.Header.Set("Authorization", "token "+c.token)
+		}
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("failed to perform request: %w", err)
+		}
+
+		if resp.StatusCode == http.StatusForbidden {
+			resp.Body.Close()
+			log.Printf("Rate limit hit for %s. Waiting for %v before retrying...", path, backoff)
+			time.Sleep(backoff)
+			backoff *= 2
+			continue
+		}
+
+		body, readErr := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if readErr != nil {
+			return nil, fmt.Errorf("failed to read response body for %s: %w", path, readErr)
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("GitHub API returned non-200 status for %s: %d - %s", path, resp.StatusCode, string(body))
+		}
+
+		// Small delay between successful requests to avoid hitting the rate limit.
+		time.Sleep(2 * time.Second)
+		return body, nil
+	}
 }
 
 // GithubOwner represents the owner of a repository as returned by the GitHub API.
@@ -196,65 +243,29 @@ func toModelsRepository(repo GithubRepository) models.Repository {
 
 // SearchRepositories searches for repositories on GitHub based on a query.
 func (c *GitHubClient) SearchRepositories(query string, page int) (*SearchRepositoriesResponse, error) {
-	backoffTime := 5 * time.Second
-	for {
-		req, err := http.NewRequest("GET", fmt.Sprintf("%s/search/repositories?q=%s&page=%d&per_page=100", c.baseURL, query, page), nil)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create request: %w", err)
-		}
+	// Encode the query so special characters (spaces, colons, etc.) are safe.
+	path := fmt.Sprintf("/search/repositories?q=%s&page=%d&per_page=100", url.QueryEscape(query), page)
 
-		req.Header.Set("Accept", "application/vnd.github.v3+json")
-		if c.token != "" {
-			req.Header.Set("Authorization", fmt.Sprintf("token %s", c.token))
-		}
-
-		resp, err := c.httpClient.Do(req)
-		if err != nil {
-			return nil, fmt.Errorf("failed to perform request: %w", err)
-		}
-
-		if resp.StatusCode == http.StatusForbidden {
-			log.Printf("Rate limit hit. Waiting for %v before retrying...", backoffTime)
-			time.Sleep(backoffTime)
-			backoffTime *= 2 // Double the backoff time for the next potential failure
-			resp.Body.Close()
-			continue
-		}
-
-		if resp.StatusCode != http.StatusOK {
-			bodyBytes, _ := ioutil.ReadAll(resp.Body)
-			resp.Body.Close()
-			return nil, fmt.Errorf("GitHub API returned non-200 status: %d - %s", resp.StatusCode, string(bodyBytes))
-		}
-
-		backoffTime = 5 * time.Second // Reset backoff time on success
-
-		bodyBytes, err := ioutil.ReadAll(resp.Body)
-		if err != nil {
-			resp.Body.Close()
-			return nil, fmt.Errorf("failed to read response body: %w", err)
-		}
-		resp.Body.Close()
-
-		var githubSearchResp GithubSearchRepositoriesResponse
-		if err := json.Unmarshal(bodyBytes, &githubSearchResp); err != nil {
-			return nil, fmt.Errorf("failed to unmarshal response: %w", err)
-		}
-
-		var modelRepos []models.Repository
-		for _, item := range githubSearchResp.Items {
-			modelRepos = append(modelRepos, toModelsRepository(item))
-		}
-
-		searchResp := SearchRepositoriesResponse{
-			TotalCount:        githubSearchResp.TotalCount,
-			IncompleteResults: githubSearchResp.IncompleteResults,
-			Items:             modelRepos,
-		}
-
-		time.Sleep(2 * time.Second) // Wait 2 seconds between successful requests
-		return &searchResp, nil
+	body, err := c.doGet(path)
+	if err != nil {
+		return nil, err
 	}
+
+	var githubSearchResp GithubSearchRepositoriesResponse
+	if err := json.Unmarshal(body, &githubSearchResp); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
+	}
+
+	modelRepos := make([]models.Repository, 0, len(githubSearchResp.Items))
+	for _, item := range githubSearchResp.Items {
+		modelRepos = append(modelRepos, toModelsRepository(item))
+	}
+
+	return &SearchRepositoriesResponse{
+		TotalCount:        githubSearchResp.TotalCount,
+		IncompleteResults: githubSearchResp.IncompleteResults,
+		Items:             modelRepos,
+	}, nil
 }
 
 // FetchRepoData is a placeholder for fetching detailed repository data.
@@ -265,165 +276,54 @@ func FetchRepoData(repoURL string, token string) ([]byte, error) {
 
 // GetTags fetches the tags for a repository.
 func (c *GitHubClient) GetTags(repoFullName string) ([]string, error) {
-	backoffTime := 5 * time.Second
-	for {
-		req, err := http.NewRequest("GET", fmt.Sprintf("%s/repos/%s/tags", c.baseURL, repoFullName), nil)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create request: %w", err)
-		}
-
-		req.Header.Set("Accept", "application/vnd.github.v3+json")
-		if c.token != "" {
-			req.Header.Set("Authorization", fmt.Sprintf("token %s", c.token))
-		}
-
-		resp, err := c.httpClient.Do(req)
-		if err != nil {
-			return nil, fmt.Errorf("failed to perform request: %w", err)
-		}
-
-		if resp.StatusCode == http.StatusForbidden {
-			log.Printf("Rate limit hit for %s. Waiting for %v before retrying...", repoFullName, backoffTime)
-			time.Sleep(backoffTime)
-			backoffTime *= 2 // Double the backoff time for the next potential failure
-			resp.Body.Close()
-			continue
-		}
-
-		if resp.StatusCode != http.StatusOK {
-			bodyBytes, _ := ioutil.ReadAll(resp.Body)
-			resp.Body.Close()
-			return nil, fmt.Errorf("GitHub API returned non-200 status for %s: %d - %s", repoFullName, resp.StatusCode, string(bodyBytes))
-		}
-
-		backoffTime = 5 * time.Second // Reset backoff time on success
-
-		bodyBytes, err := ioutil.ReadAll(resp.Body)
-		if err != nil {
-			resp.Body.Close()
-			return nil, fmt.Errorf("failed to read response body for %s: %w", repoFullName, err)
-		}
-		resp.Body.Close()
-
-		var tags []struct {
-			Name string `json:"name"`
-		}
-		if err := json.Unmarshal(bodyBytes, &tags); err != nil {
-			return nil, fmt.Errorf("failed to unmarshal response for %s: %w", repoFullName, err)
-		}
-
-		var tagNames []string
-		for _, tag := range tags {
-			tagNames = append(tagNames, tag.Name)
-		}
-
-		time.Sleep(2 * time.Second) // Wait 2 seconds between successful requests
-		return tagNames, nil
+	body, err := c.doGet(fmt.Sprintf("/repos/%s/tags", repoFullName))
+	if err != nil {
+		return nil, err
 	}
+
+	var tags []struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(body, &tags); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal response for %s: %w", repoFullName, err)
+	}
+
+	tagNames := make([]string, 0, len(tags))
+	for _, tag := range tags {
+		tagNames = append(tagNames, tag.Name)
+	}
+
+	return tagNames, nil
 }
 
 // GetLanguages fetches the languages for a repository.
 func (c *GitHubClient) GetLanguages(repoFullName string) (map[string]int, error) {
-	backoffTime := 5 * time.Second
-	for {
-		req, err := http.NewRequest("GET", fmt.Sprintf("%s/repos/%s/languages", c.baseURL, repoFullName), nil)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create request: %w", err)
-		}
-
-		req.Header.Set("Accept", "application/vnd.github.v3+json")
-		if c.token != "" {
-			req.Header.Set("Authorization", fmt.Sprintf("token %s", c.token))
-		}
-
-		resp, err := c.httpClient.Do(req)
-		if err != nil {
-			return nil, fmt.Errorf("failed to perform request: %w", err)
-		}
-
-		if resp.StatusCode == http.StatusForbidden {
-			log.Printf("Rate limit hit for %s. Waiting for %v before retrying...", repoFullName, backoffTime)
-			time.Sleep(backoffTime)
-			backoffTime *= 2 // Double the backoff time for the next potential failure
-			resp.Body.Close()
-			continue
-		}
-
-		if resp.StatusCode != http.StatusOK {
-			bodyBytes, _ := ioutil.ReadAll(resp.Body)
-			resp.Body.Close()
-			return nil, fmt.Errorf("GitHub API returned non-200 status for %s: %d - %s", repoFullName, resp.StatusCode, string(bodyBytes))
-		}
-
-		backoffTime = 5 * time.Second // Reset backoff time on success
-
-		bodyBytes, err := ioutil.ReadAll(resp.Body)
-		if err != nil {
-			resp.Body.Close()
-			return nil, fmt.Errorf("failed to read response body for %s: %w", repoFullName, err)
-		}
-		resp.Body.Close()
-
-		var languages map[string]int
-		if err := json.Unmarshal(bodyBytes, &languages); err != nil {
-			return nil, fmt.Errorf("failed to unmarshal response for %s: %w", repoFullName, err)
-		}
-
-		time.Sleep(2 * time.Second) // Wait 2 seconds between successful requests
-		return languages, nil
+	body, err := c.doGet(fmt.Sprintf("/repos/%s/languages", repoFullName))
+	if err != nil {
+		return nil, err
 	}
+
+	var languages map[string]int
+	if err := json.Unmarshal(body, &languages); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal response for %s: %w", repoFullName, err)
+	}
+
+	return languages, nil
 }
 
 // GetReadme fetches the README for a repository.
 func (c *GitHubClient) GetReadme(repoFullName string) (string, error) {
-	backoffTime := 5 * time.Second
-	for {
-		req, err := http.NewRequest("GET", fmt.Sprintf("%s/repos/%s/readme", c.baseURL, repoFullName), nil)
-		if err != nil {
-			return "", fmt.Errorf("failed to create request: %w", err)
-		}
-
-		req.Header.Set("Accept", "application/vnd.github.v3+json")
-		if c.token != "" {
-			req.Header.Set("Authorization", fmt.Sprintf("token %s", c.token))
-		}
-
-		resp, err := c.httpClient.Do(req)
-		if err != nil {
-			return "", fmt.Errorf("failed to perform request: %w", err)
-		}
-
-		if resp.StatusCode == http.StatusForbidden {
-			log.Printf("Rate limit hit for %s. Waiting for %v before retrying...", repoFullName, backoffTime)
-			time.Sleep(backoffTime)
-			backoffTime *= 2 // Double the backoff time for the next potential failure
-			resp.Body.Close()
-			continue
-		}
-
-		if resp.StatusCode != http.StatusOK {
-			bodyBytes, _ := ioutil.ReadAll(resp.Body)
-			resp.Body.Close()
-			return "", fmt.Errorf("GitHub API returned non-200 status for %s: %d - %s", repoFullName, resp.StatusCode, string(bodyBytes))
-		}
-
-		backoffTime = 5 * time.Second // Reset backoff time on success
-
-		bodyBytes, err := ioutil.ReadAll(resp.Body)
-		if err != nil {
-			resp.Body.Close()
-			return "", fmt.Errorf("failed to read response body for %s: %w", repoFullName, err)
-		}
-		resp.Body.Close()
-
-		var readme struct {
-			DownloadURL string `json:"download_url"`
-		}
-		if err := json.Unmarshal(bodyBytes, &readme); err != nil {
-			return "", fmt.Errorf("failed to unmarshal response for %s: %w", repoFullName, err)
-		}
-
-		time.Sleep(2 * time.Second) // Wait 2 seconds between successful requests
-		return readme.DownloadURL, nil
+	body, err := c.doGet(fmt.Sprintf("/repos/%s/readme", repoFullName))
+	if err != nil {
+		return "", err
 	}
+
+	var readme struct {
+		DownloadURL string `json:"download_url"`
+	}
+	if err := json.Unmarshal(body, &readme); err != nil {
+		return "", fmt.Errorf("failed to unmarshal response for %s: %w", repoFullName, err)
+	}
+
+	return readme.DownloadURL, nil
 }
