@@ -15,6 +15,7 @@ type Config struct {
 	RabbitMQPassword         string
 	GitHubToken              string
 	PostgresHost             string
+	PostgresPort             string
 	PostgresUser             string
 	PostgresPassword         string
 	PostgresDB               string
@@ -63,36 +64,59 @@ func ParseDuration(durationStr string) (time.Duration, error) {
 	return time.ParseDuration(durationStr)
 }
 
-// Load loads configuration from the environment.
+// getEnvInt reads an integer environment variable, falling back to a default
+// when it is unset. It only returns an error when the variable is set to a
+// non-integer value.
+func getEnvInt(name string, fallback int) (int, error) {
+	raw := os.Getenv(name)
+	if raw == "" {
+		return fallback, nil
+	}
+	return strconv.Atoi(raw)
+}
+
+// getEnvDuration reads a duration environment variable, falling back to a
+// default when it is unset. It only returns an error when the variable is set
+// to an invalid duration.
+func getEnvDuration(name string, fallback time.Duration) (time.Duration, error) {
+	raw := os.Getenv(name)
+	if raw == "" {
+		return fallback, nil
+	}
+	return ParseDuration(raw)
+}
+
+// Load loads configuration from the environment. Optional settings fall back to
+// sensible defaults so services that do not use every subsystem can still start.
 func Load() (*Config, error) {
-	lastUpdateCutStr := os.Getenv("LAST_UPDATE_CUT")
-	lastUpdateCut, err := ParseDuration(lastUpdateCutStr)
+	lastUpdateCut, err := getEnvDuration("LAST_UPDATE_CUT", 24*30*24*time.Hour)
 	if err != nil {
 		return nil, fmt.Errorf("invalid LAST_UPDATE_CUT duration: %w", err)
 	}
 
-	similarityListSizeStr := os.Getenv("SIMILARITY_LIST_SIZE")
-	similarityListSize, err := strconv.Atoi(similarityListSizeStr)
+	similarityListSize, err := getEnvInt("SIMILARITY_LIST_SIZE", 200)
 	if err != nil {
 		return nil, fmt.Errorf("invalid SIMILARITY_LIST_SIZE: %w", err)
 	}
 
-	qdrantPortStr := os.Getenv("QDRANT_PORT")
-	qdrantPort, err := strconv.Atoi(qdrantPortStr)
+	qdrantPort, err := getEnvInt("QDRANT_PORT", 6333)
 	if err != nil {
 		return nil, fmt.Errorf("invalid QDRANT_PORT: %w", err)
 	}
 
-	embeddingApiMaxInstancesStr := os.Getenv("EMBEDDING_API_MAX_INSTANCES")
-	embeddingApiMaxInstances, err := strconv.Atoi(embeddingApiMaxInstancesStr)
+	embeddingApiMaxInstances, err := getEnvInt("EMBEDDING_API_MAX_INSTANCES", 3)
 	if err != nil {
 		return nil, fmt.Errorf("invalid EMBEDDING_API_MAX_INSTANCES: %w", err)
 	}
 
-	embeddingApiIdleTimeoutStr := os.Getenv("EMBEDDING_API_IDLE_TIMEOUT")
-	embeddingApiIdleTimeout, err := strconv.Atoi(embeddingApiIdleTimeoutStr)
+	embeddingApiIdleTimeout, err := getEnvInt("EMBEDDING_API_IDLE_TIMEOUT", 600)
 	if err != nil {
 		return nil, fmt.Errorf("invalid EMBEDDING_API_IDLE_TIMEOUT: %w", err)
+	}
+
+	postgresPort := os.Getenv("POSTGRES_PORT")
+	if postgresPort == "" {
+		postgresPort = "5432"
 	}
 
 	debug, _ := strconv.ParseBool(os.Getenv("DEBUG"))
@@ -103,6 +127,7 @@ func Load() (*Config, error) {
 		RabbitMQPassword:         os.Getenv("RABBITMQ_DEFAULT_PASS"),
 		GitHubToken:              os.Getenv("GITHUB_TOKEN"),
 		PostgresHost:             os.Getenv("POSTGRES_HOST"),
+		PostgresPort:             postgresPort,
 		PostgresUser:             os.Getenv("POSTGRES_USER"),
 		PostgresPassword:         os.Getenv("POSTGRES_PASSWORD"),
 		PostgresDB:               os.Getenv("POSTGRES_DB"),

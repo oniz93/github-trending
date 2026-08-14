@@ -36,7 +36,7 @@ func main() {
 
 	var postgresConnection *database.PostgresConnection
 	for i := 0; i < maxRetries; i++ {
-		postgresConnection, err = database.NewPostgresConnection(cfg.PostgresHost, "5432", cfg.PostgresUser, cfg.PostgresPassword, cfg.PostgresDB)
+		postgresConnection, err = database.NewPostgresConnection(cfg.PostgresHost, cfg.PostgresPort, cfg.PostgresUser, cfg.PostgresPassword, cfg.PostgresDB)
 		if err == nil {
 			break
 		}
