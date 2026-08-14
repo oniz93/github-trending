@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go"
@@ -200,6 +201,69 @@ func (ch *ClickHouseConnection) GetRepositoryIDsToUpdate(since time.Time) ([]int
 	}
 
 	return repoIDs, nil
+}
+
+// GetLatestRepositoryStatsBatch retrieves the latest statistic for each of the
+// given repository IDs in a single query. It returns a map keyed by repository ID.
+func (ch *ClickHouseConnection) GetLatestRepositoryStatsBatch(repoIDs []int64) (map[int64]*models.RepositoryStat, error) {
+	result := make(map[int64]*models.RepositoryStat, len(repoIDs))
+	if len(repoIDs) == 0 {
+		return result, nil
+	}
+
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(repoIDs)), ",")
+	args := make([]interface{}, 0, len(repoIDs)*2)
+	for _, id := range repoIDs {
+		args = append(args, id)
+	}
+	for _, id := range repoIDs {
+		args = append(args, id)
+	}
+
+	// Select the row with the most recent event_time for each repository.
+	query := fmt.Sprintf(`
+		SELECT
+			repository_id, event_date, event_time, stargazers_count,
+			watchers_count, forks_count, open_issues_count, pushed_at, score
+		FROM repository_stats
+		WHERE repository_id IN (%s)
+		  AND (repository_id, event_time) IN (
+			SELECT repository_id, max(event_time)
+			FROM repository_stats
+			WHERE repository_id IN (%s)
+			GROUP BY repository_id
+		  )
+	`, placeholders, placeholders)
+
+	rows, err := ch.DB.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var repoID int64
+		var stat models.RepositoryStat
+		if err := rows.Scan(
+			&repoID,
+			&stat.EventDate,
+			&stat.EventTime,
+			&stat.StargazersCount,
+			&stat.WatchersCount,
+			&stat.ForksCount,
+			&stat.OpenIssuesCount,
+			&stat.PushedAt,
+			&stat.Score,
+		); err != nil {
+			return nil, err
+		}
+		result[repoID] = &stat
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return result, nil
 }
 
 // GetTrendingRepositoryIDsByGrowth retrieves repository IDs based on star and fork growth over a period.

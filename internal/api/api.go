@@ -143,6 +143,30 @@ func decompress(data []byte) ([]byte, error) {
 	return snappy.Decode(nil, data)
 }
 
+// decodeStatCache decodes a cached repository-stats payload and returns the
+// most recent observation. It returns nil for missing, empty, or malformed
+// entries so callers can fall back to fetching from ClickHouse.
+func decodeStatCache(res interface{}) *models.RepositoryStat {
+	if res == nil {
+		return nil
+	}
+	str, ok := res.(string)
+	if !ok {
+		return nil
+	}
+	decompressed, err := decompress([]byte(str))
+	if err != nil {
+		return nil
+	}
+	var stats []models.RepositoryStat
+	if err := json.Unmarshal(decompressed, &stats); err != nil || len(stats) == 0 {
+		return nil
+	}
+	// Stats are stored newest-first (ORDER BY event_time DESC), so the first
+	// element is the most recent observation.
+	return &stats[0]
+}
+
 func handleRetrieveList(cfg *config.Config, redisClient *redis.Client, pgdb *database.PostgresConnection, chdb *database.ClickHouseConnection) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		originalSessionID := c.Query("sessionId")
@@ -333,38 +357,59 @@ func handleRetrieveList(cfg *config.Config, redisClient *redis.Client, pgdb *dat
 			Stats      *models.RepositoryStat `json:"stats,omitempty"`
 		}
 
-		responseRepos := make([]RepositoryResponse, len(repositories))
+		// Collect the repository IDs once so stats can be fetched in bulk.
+		repoIDs := make([]int64, len(repositories))
 		for i, repo := range repositories {
-			var lastStat *models.RepositoryStat
-			statsCacheKey := fmt.Sprintf("repo_stats:%d", repo.Repository.ID)
-			cachedStats, err := redisClient.Get(c.Request.Context(), statsCacheKey).Result()
-			if err == nil {
-				decompressed, err := decompress([]byte(cachedStats))
-				if err == nil {
-					var stats []models.RepositoryStat
-					if json.Unmarshal(decompressed, &stats) == nil && len(stats) > 0 {
-						lastStat = &stats[len(stats)-1]
-					}
+			repoIDs[i] = int64(repo.Repository.ID)
+		}
+
+		cacheKeys := make([]string, len(repoIDs))
+		for i, id := range repoIDs {
+			cacheKeys[i] = fmt.Sprintf("repo_stats:%d", id)
+		}
+
+		statsByRepoID := make(map[int64]*models.RepositoryStat, len(repoIDs))
+
+		// 1. Serve whatever we can from Redis with a single MGET round-trip.
+		missedIDs := make([]int64, 0, len(repoIDs))
+		if cached, err := redisClient.MGet(c.Request.Context(), cacheKeys...).Result(); err == nil {
+			for i, res := range cached {
+				if stat := decodeStatCache(res); stat != nil {
+					statsByRepoID[repoIDs[i]] = stat
+					continue
 				}
-			} else {
-				stats, err := chdb.GetRepositoryStats(int64(repo.Repository.ID))
-				if err != nil {
-					log.Printf("Failed to get stats for repository %d from ClickHouse: %v", repo.Repository.ID, err)
-				} else {
-					if len(stats) > 0 {
-						lastStat = &stats[len(stats)-1]
-					}
-					jsonBytes, err := json.Marshal(stats)
-					if err == nil {
-						redisClient.Set(c.Request.Context(), statsCacheKey, compress(jsonBytes), 12*time.Hour)
-					}
+				missedIDs = append(missedIDs, repoIDs[i])
+			}
+		} else {
+			missedIDs = append(missedIDs, repoIDs...)
+		}
+
+		// 2. Fetch the remaining stats from ClickHouse in one batch query and
+		// backfill the Redis cache.
+		if len(missedIDs) > 0 {
+			batchStats, err := chdb.GetLatestRepositoryStatsBatch(missedIDs)
+			if err != nil {
+				log.Printf("Failed to get latest stats for %d repositories from ClickHouse: %v", len(missedIDs), err)
+			}
+			for _, id := range missedIDs {
+				stat, ok := batchStats[id]
+				if !ok {
+					continue
+				}
+				statsByRepoID[id] = stat
+				jsonBytes, err := json.Marshal([]models.RepositoryStat{*stat})
+				if err == nil {
+					redisClient.Set(c.Request.Context(), fmt.Sprintf("repo_stats:%d", id), compress(jsonBytes), 12*time.Hour)
 				}
 			}
+		}
 
+		responseRepos := make([]RepositoryResponse, len(repositories))
+		for i, repo := range repositories {
 			responseRepos[i] = RepositoryResponse{
 				Repository: repo.Repository,
 				Owner:      repo.Owner,
-				Stats:      lastStat,
+				Stats:      statsByRepoID[int64(repo.Repository.ID)],
 			}
 		}
 
