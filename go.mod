@@ -89,12 +89,3 @@ require (
 	gotest.tools/v3 v3.5.1 // indirect
 )
 
-replace github.com/teomiscia/github-trending/internal/config => ./internal/config
-
-replace github.com/teomiscia/github-trending/internal/database => ./internal/database
-
-replace github.com/teomiscia/github-trending/internal/github => ./internal/github
-
-replace github.com/teomiscia/github-trending/internal/messaging => ./internal/messaging
-
-replace github.com.com/teomiscia/github-trending/internal/models => ./internal/models
