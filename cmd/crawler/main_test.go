@@ -49,6 +49,12 @@ func (m *MockRabbitMQConnection) Close() error {
 	return nil
 }
 
+// NotifyClose is a no-op that returns the provided channel, satisfying the
+// messaging.MQConnection interface.
+func (m *MockRabbitMQConnection) NotifyClose(ch chan *amqp.Error) chan *amqp.Error {
+	return ch
+}
+
 // MockPostgresConnection simulates a PostgreSQL connection for testing.
 type MockPostgresConnection struct {
 	LastCrawlTime time.Time
