@@ -91,7 +91,7 @@ func (c *TwitterClient) Post(repo models.Repository) error {
 	if err != nil {
 		var twitterErr *twitter.ErrorResponse
 		if errors.As(err, &twitterErr) {
-			return fmt.Errorf("twitter API error: %v", twitterErr.Errors)
+			return fmt.Errorf("twitter API error: Title: %s, Detail: %s, Status: %d, Errors: %v", twitterErr.Title, twitterErr.Detail, twitterErr.StatusCode, twitterErr.Errors)
 		}
 		return err
 	}
