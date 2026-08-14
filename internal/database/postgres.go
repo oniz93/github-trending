@@ -36,11 +36,14 @@ func (pc *PostgresConnection) WithRedis(client *redis.Client) *PostgresConnectio
 	return pc
 }
 
-func compress(data []byte) []byte {
+// Compress encodes data with Snappy. It is shared by packages that need a
+// compact representation for cache and wire payloads.
+func Compress(data []byte) []byte {
 	return snappy.Encode(nil, data)
 }
 
-func decompress(data []byte) ([]byte, error) {
+// Decompress decodes a Snappy-encoded payload produced by Compress.
+func Decompress(data []byte) ([]byte, error) {
 	return snappy.Decode(nil, data)
 }
 
@@ -88,7 +91,7 @@ func (pc *PostgresConnection) GetTrendingRepositoryIDs(languages, tags, topics, 
 
 		val, err := pc.RedisClient.Get(context.Background(), key).Result()
 		if err == nil {
-			decompressed, err := decompress([]byte(val))
+			decompressed, err := Decompress([]byte(val))
 			if err == nil {
 				var ids []int64
 				if err := json.Unmarshal(decompressed, &ids); err == nil {
@@ -104,7 +107,7 @@ func (pc *PostgresConnection) GetTrendingRepositoryIDs(languages, tags, topics, 
 
 		jsonBytes, err := json.Marshal(ids)
 		if err == nil {
-			compressed := compress(jsonBytes)
+			compressed := Compress(jsonBytes)
 			pc.RedisClient.Set(context.Background(), key, compressed, 24*time.Hour)
 		}
 
@@ -231,7 +234,7 @@ func (pc *PostgresConnection) GetLastCrawlTime(repoID int64) (time.Time, error) 
 		key := fmt.Sprintf("last_crawl_time:%d", repoID)
 		val, err := pc.RedisClient.Get(context.Background(), key).Result()
 		if err == nil {
-			decompressed, err := decompress([]byte(val))
+			decompressed, err := Decompress([]byte(val))
 			if err == nil {
 				t, err := time.Parse(time.RFC3339Nano, string(decompressed))
 				if err == nil {
@@ -252,7 +255,7 @@ func (pc *PostgresConnection) GetLastCrawlTime(repoID int64) (time.Time, error) 
 
 	if pc.RedisClient != nil {
 		key := fmt.Sprintf("last_crawl_time:%d", repoID)
-		compressed := compress([]byte(lastCrawledAt.Format(time.RFC3339Nano)))
+		compressed := Compress([]byte(lastCrawledAt.Format(time.RFC3339Nano)))
 		pc.RedisClient.Set(context.Background(), key, compressed, 1*time.Hour)
 	}
 
@@ -405,7 +408,7 @@ func (pc *PostgresConnection) GetRepositoryByID(repoID int64) (models.Repository
 		key := fmt.Sprintf("repository:%d", repoID)
 		val, err := pc.RedisClient.Get(context.Background(), key).Result()
 		if err == nil {
-			decompressed, err := decompress([]byte(val))
+			decompressed, err := Decompress([]byte(val))
 			if err == nil {
 				var repo models.Repository
 				if err := json.Unmarshal(decompressed, &repo); err == nil {
@@ -424,7 +427,7 @@ func (pc *PostgresConnection) GetRepositoryByID(repoID int64) (models.Repository
 		key := fmt.Sprintf("repository:%d", repo.ID)
 		jsonBytes, err := json.Marshal(repo)
 		if err == nil {
-			compressed := compress(jsonBytes)
+			compressed := Compress(jsonBytes)
 			pc.RedisClient.Set(context.Background(), key, compressed, 12*time.Hour)
 		}
 	}
@@ -533,7 +536,7 @@ func (pc *PostgresConnection) GetRecentClickedRepositoryIDs(sessionID string, li
 		key := fmt.Sprintf("recent_clicks:%s:%d", sessionID, limit)
 		val, err := pc.RedisClient.Get(context.Background(), key).Result()
 		if err == nil {
-			decompressed, err := decompress([]byte(val))
+			decompressed, err := Decompress([]byte(val))
 			if err == nil {
 				var ids []int64
 				if err := json.Unmarshal(decompressed, &ids); err == nil {
@@ -562,7 +565,7 @@ func (pc *PostgresConnection) GetRecentClickedRepositoryIDs(sessionID string, li
 		key := fmt.Sprintf("recent_clicks:%s:%d", sessionID, limit)
 		jsonBytes, err := json.Marshal(ids)
 		if err == nil {
-			compressed := compress(jsonBytes)
+			compressed := Compress(jsonBytes)
 			pc.RedisClient.Set(context.Background(), key, compressed, 5*time.Minute) // Cache for 5 minutes
 		}
 	}
@@ -576,7 +579,7 @@ func (pc *PostgresConnection) GetRepositoryIDs(limit, offset int) ([]int64, erro
 		key := fmt.Sprintf("repo_ids:%d:%d", limit, offset)
 		val, err := pc.RedisClient.Get(context.Background(), key).Result()
 		if err == nil {
-			decompressed, err := decompress([]byte(val))
+			decompressed, err := Decompress([]byte(val))
 			if err == nil {
 				var ids []int64
 				if err := json.Unmarshal(decompressed, &ids); err == nil {
@@ -605,7 +608,7 @@ func (pc *PostgresConnection) GetRepositoryIDs(limit, offset int) ([]int64, erro
 		key := fmt.Sprintf("repo_ids:%d:%d", limit, offset)
 		jsonBytes, err := json.Marshal(ids)
 		if err == nil {
-			compressed := compress(jsonBytes)
+			compressed := Compress(jsonBytes)
 			pc.RedisClient.Set(context.Background(), key, compressed, 12*time.Hour) // Cache for 12 hour
 		}
 	}
@@ -633,7 +636,7 @@ func (pc *PostgresConnection) GetRepositorySimilarity(repoID int64) ([]byte, err
 		key := fmt.Sprintf("similarity:%d", repoID)
 		val, err := pc.RedisClient.Get(context.Background(), key).Result()
 		if err == nil {
-			return decompress([]byte(val))
+			return Decompress([]byte(val))
 		}
 	}
 
@@ -649,7 +652,7 @@ func (pc *PostgresConnection) GetRepositorySimilarity(repoID int64) ([]byte, err
 
 	if pc.RedisClient != nil {
 		key := fmt.Sprintf("similarity:%d", repoID)
-		compressed := compress(data)
+		compressed := Compress(data)
 		pc.RedisClient.Set(context.Background(), key, compressed, 24*time.Hour) // Cache for 24 hours
 	}
 
@@ -674,7 +677,7 @@ func (pc *PostgresConnection) GetRepositoriesDataByIDs(repoIDs []int64) ([]model
 			for i, res := range cachedResults {
 				if res != nil {
 					var repoData models.RepositoryData
-					decompressed, err := decompress([]byte(res.(string)))
+					decompressed, err := Decompress([]byte(res.(string)))
 					if err == nil {
 						if err := json.Unmarshal(decompressed, &repoData); err == nil {
 							results = append(results, repoData)
@@ -698,7 +701,7 @@ func (pc *PostgresConnection) GetRepositoriesDataByIDs(repoIDs []int64) ([]model
 				key := fmt.Sprintf("repository_data_by_id:%d", dbRes.Repository.ID)
 				jsonBytes, err := json.Marshal(dbRes)
 				if err == nil {
-					compressed := compress(jsonBytes)
+					compressed := Compress(jsonBytes)
 					pc.RedisClient.Set(context.Background(), key, compressed, 12*time.Hour)
 				}
 			}
@@ -809,4 +812,3 @@ func (pc *PostgresConnection) MarkRepositoryAsPosted(repoID int64) error {
 	_, err := pc.DB.Exec("INSERT INTO posted_repositories (repository_id) VALUES ($1) ON CONFLICT (repository_id) DO NOTHING", repoID)
 	return err
 }
-

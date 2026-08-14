@@ -17,7 +17,6 @@ import (
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
-	"github.com/golang/snappy"
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 	"github.com/teomiscia/github-trending/internal/config"
@@ -135,14 +134,6 @@ func errorResponse(c *gin.Context, code int, genericMessage string, err error, d
 	c.JSON(code, response)
 }
 
-func compress(data []byte) []byte {
-	return snappy.Encode(nil, data)
-}
-
-func decompress(data []byte) ([]byte, error) {
-	return snappy.Decode(nil, data)
-}
-
 func handleRetrieveList(cfg *config.Config, redisClient *redis.Client, pgdb *database.PostgresConnection, chdb *database.ClickHouseConnection) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		originalSessionID := c.Query("sessionId")
@@ -183,7 +174,7 @@ func handleRetrieveList(cfg *config.Config, redisClient *redis.Client, pgdb *dat
 		cacheKey := buildCacheKey(originalSessionID)
 		cachedResponse, err := redisClient.Get(c.Request.Context(), cacheKey).Result()
 		if err == nil {
-			decompressed, err := decompress([]byte(cachedResponse))
+			decompressed, err := database.Decompress([]byte(cachedResponse))
 			if err == nil {
 				var response gin.H
 				if err := json.Unmarshal(decompressed, &response); err == nil {
@@ -210,7 +201,7 @@ func handleRetrieveList(cfg *config.Config, redisClient *redis.Client, pgdb *dat
 			trendingCacheKey := "trending_repo_ids_by_growth:30"
 			cachedTrending, err := redisClient.Get(c.Request.Context(), trendingCacheKey).Result()
 			if err == nil {
-				decompressed, err := decompress([]byte(cachedTrending))
+				decompressed, err := database.Decompress([]byte(cachedTrending))
 				if err == nil {
 					json.Unmarshal(decompressed, &recommendedRepoIDs)
 				}
@@ -225,7 +216,7 @@ func handleRetrieveList(cfg *config.Config, redisClient *redis.Client, pgdb *dat
 				recommendedRepoIDs = trendingRepoIDs
 				jsonBytes, err := json.Marshal(recommendedRepoIDs)
 				if err == nil {
-					redisClient.Set(c.Request.Context(), trendingCacheKey, compress(jsonBytes), 24*time.Hour)
+					redisClient.Set(c.Request.Context(), trendingCacheKey, database.Compress(jsonBytes), 24*time.Hour)
 				}
 			}
 		} else {
@@ -276,7 +267,7 @@ func handleRetrieveList(cfg *config.Config, redisClient *redis.Client, pgdb *dat
 
 			cachedFiltered, err := redisClient.Get(c.Request.Context(), filterCacheKey).Result()
 			if err == nil {
-				decompressed, err := decompress([]byte(cachedFiltered))
+				decompressed, err := database.Decompress([]byte(cachedFiltered))
 				if err == nil {
 					json.Unmarshal(decompressed, &recommendedRepoIDs)
 				}
@@ -289,7 +280,7 @@ func handleRetrieveList(cfg *config.Config, redisClient *redis.Client, pgdb *dat
 				recommendedRepoIDs = filteredRepoIDs
 				jsonBytes, err := json.Marshal(recommendedRepoIDs)
 				if err == nil {
-					redisClient.Set(c.Request.Context(), filterCacheKey, compress(jsonBytes), 24*time.Hour)
+					redisClient.Set(c.Request.Context(), filterCacheKey, database.Compress(jsonBytes), 24*time.Hour)
 				}
 			}
 		}
@@ -339,7 +330,7 @@ func handleRetrieveList(cfg *config.Config, redisClient *redis.Client, pgdb *dat
 			statsCacheKey := fmt.Sprintf("repo_stats:%d", repo.Repository.ID)
 			cachedStats, err := redisClient.Get(c.Request.Context(), statsCacheKey).Result()
 			if err == nil {
-				decompressed, err := decompress([]byte(cachedStats))
+				decompressed, err := database.Decompress([]byte(cachedStats))
 				if err == nil {
 					var stats []models.RepositoryStat
 					if json.Unmarshal(decompressed, &stats) == nil && len(stats) > 0 {
@@ -356,7 +347,7 @@ func handleRetrieveList(cfg *config.Config, redisClient *redis.Client, pgdb *dat
 					}
 					jsonBytes, err := json.Marshal(stats)
 					if err == nil {
-						redisClient.Set(c.Request.Context(), statsCacheKey, compress(jsonBytes), 12*time.Hour)
+						redisClient.Set(c.Request.Context(), statsCacheKey, database.Compress(jsonBytes), 12*time.Hour)
 					}
 				}
 			}
@@ -375,7 +366,7 @@ func handleRetrieveList(cfg *config.Config, redisClient *redis.Client, pgdb *dat
 		}
 		jsonResponse, err := json.Marshal(finalResponse)
 		if err == nil {
-			compressedResponse := compress(jsonResponse)
+			compressedResponse := database.Compress(jsonResponse)
 			// Cache for the actual session ID (new or existing)
 			redisClient.Set(c.Request.Context(), buildCacheKey(sessionID), compressedResponse, 24*time.Hour)
 			// If it was a new session, also cache for the empty session ID to serve subsequent initial requests
@@ -424,7 +415,7 @@ func handleGetReadme(cfg *config.Config, redisClient *redis.Client, minioConnect
 		cacheKey := fmt.Sprintf("readme_html:%s", repoID)
 		cachedHTML, err := redisClient.Get(c.Request.Context(), cacheKey).Result()
 		if err == nil {
-			decompressed, err := decompress([]byte(cachedHTML))
+			decompressed, err := database.Decompress([]byte(cachedHTML))
 			if err == nil {
 				c.Data(http.StatusOK, "text/html; charset=utf-8", decompressed)
 				return
@@ -472,7 +463,7 @@ func handleGetReadme(cfg *config.Config, redisClient *redis.Client, minioConnect
 		htmlContent := []byte(result["html"])
 
 		// --- Cache Result ---
-		compressedHTML := compress(htmlContent)
+		compressedHTML := database.Compress(htmlContent)
 		err = redisClient.Set(c.Request.Context(), cacheKey, compressedHTML, 24*time.Hour).Err()
 		if err != nil {
 			log.Printf("Failed to cache README for repo %s: %v", repoID, err)
