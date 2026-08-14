@@ -2,7 +2,6 @@ package api
 
 import (
 	"bytes"
-	"context"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
@@ -91,7 +90,7 @@ func handleGetRepositoryDetails(cfg *config.Config, redisClient *redis.Client, p
 			log.Printf("Failed to track repository view for repo %d: %v", repoID, err)
 		}
 		// Add the repository to the seen set in Redis
-		redisClient.SAdd(context.Background(), sessionID, fmt.Sprint(repoID))
+		redisClient.SAdd(c.Request.Context(), sessionID, fmt.Sprint(repoID))
 
 		repoData, err := pgdb.GetRepositoryByID(repoID)
 		if err != nil {
@@ -295,7 +294,7 @@ func handleRetrieveList(cfg *config.Config, redisClient *redis.Client, pgdb *dat
 		}
 
 		// Filter out seen repos
-		seenRepoIDs, _ := redisClient.SMembers(context.Background(), sessionID).Result()
+		seenRepoIDs, _ := redisClient.SMembers(c.Request.Context(), sessionID).Result()
 		seenRepoIDMap := make(map[int64]bool)
 		for _, idStr := range seenRepoIDs {
 			id, _ := strconv.ParseInt(idStr, 10, 64)
@@ -406,7 +405,7 @@ func handleTrackOpenRepository(cfg *config.Config, redisClient *redis.Client, pg
 		}
 
 		// Add the repository to the seen set in Redis
-		redisClient.SAdd(context.Background(), requestBody.SessionID, fmt.Sprint(requestBody.RepositoryID))
+		redisClient.SAdd(c.Request.Context(), requestBody.SessionID, fmt.Sprint(requestBody.RepositoryID))
 
 		c.JSON(http.StatusOK, gin.H{"status": "success"})
 	}
@@ -435,7 +434,7 @@ func handleGetReadme(cfg *config.Config, redisClient *redis.Client, minioConnect
 		objectName := fmt.Sprintf("readmes/%s.md", repoID)
 
 		// Get the README content from MinIO
-		readmeContent, err := minioConnection.GetFile(context.Background(), objectName)
+		readmeContent, err := minioConnection.GetFile(c.Request.Context(), objectName)
 		if err != nil {
 			errorResponse(c, http.StatusNotFound, "README not found", err, cfg.Debug)
 			return
