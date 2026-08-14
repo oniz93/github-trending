@@ -1,164 +1,70 @@
-# GitHub Trending
+# 🚀 GitHub Trending & Discovery Engine
 
-This project is a microservices-based application that discovers, analyzes, and displays trending repositories on GitHub. It includes a backend built with Go and a frontend mobile and web application built with React Native and Expo.
+A high-performance, distributed system engineered for the discovery, deep analysis, and semantic search of GitHub repositories. This project leverages a microservices architecture and an event-driven pipeline to process large-scale repository metadata, generating insights through vector embeddings and real-time analytics.
 
-## Architecture
+## 🏗 System Architecture & Concurrency Model
 
-The application is composed of the following microservices:
+The system is designed as a decoupled, event-driven pipeline where specialized services communicate via **RabbitMQ**. This architecture allows for independent scaling of each component and ensures high availability and fault tolerance.
 
-*   **`discovery-service`**: Finds new repositories to track.
-*   **`scheduler-service`**: Schedules refreshes for repositories that are already being tracked.
-*   **`crawler-service`**: Fetches repository data from the GitHub API.
-*   **`processor-service`**: Processes and stores repository data in the appropriate databases.
-*   **`writer-service`**: Writes repository data to PostgreSQL and ClickHouse.
-*   **`embedding-api-service`**: A Python service that provides an API to generate text embeddings.
-*   **`embedding-autoscaler`**: A Go service that automatically scales the `embedding-api-service` based on load.
-*   **`embedding-service`**: Generates and stores semantic embeddings for repository READMEs.
-*   **`similarity-engine-service`**: Calculates and stores similarity scores between repositories.
-*   **`api-server`**: Provides a public API for accessing trending repository data.
-*   **`web`**: A React Native application (iOS, Android, and Web) that provides a user interface for browsing trending repositories.
+*   **Distributed Ingestion**: The `discovery` and `crawler` services utilize worker pools to concurrently fetch and filter repository data from the GitHub API.
+*   **Event-Driven Pipeline**: 
+    1.  **Discovery**: Identifies new or trending repositories and publishes to `repos_to_crawl`.
+    2.  **Crawler**: Pulls metadata, tags, and languages, then publishes to `raw_data_to_process`.
+    3.  **Processor**: Downloads READMEs, stores them in **MinIO**, and triggers embedding generation via `readme_to_embed`.
+    4.  **Writer**: Handles high-throughput writes to **PostgreSQL** and **ClickHouse**.
+*   **High-Efficiency Storage**: 
+    *   **ClickHouse Integration**: Implements a custom **row-hashing mechanism** in Go to deduplicate time-series metric inserts, significantly reducing storage overhead while maintaining a granular history of repository growth.
+    *   **Qdrant Vector Search**: Powers a semantic similarity engine, enabling "find similar repos" functionality based on content embeddings rather than simple keyword matching.
 
-This design creates a robust, one-way data flow for the backend:
+## 🛠 Technical Stack
 
-`Discovery/Scheduler` -> `Crawl Queue` -> `Crawler` -> `Process Queue` -> `Processor` -> `Write Queue` -> `Writer Service` -> `Databases`
-                                                                                                  `Processor` -> `Embeddings Queue` -> `Embedding Service` -> `Embedding API` -> `Qdrant`
-                                                                                                  `Similarity Engine` -> `Qdrant` -> `Redis`
+### Backend & Microservices
+*   **Language**: **Go (1.23+)** – Core logic, high-performance concurrency, and microservices.
+*   **API Framework**: **Gin** – RESTful API entry point.
+*   **Messaging**: **RabbitMQ** – Distributed event bus for service orchestration.
+*   **AI/Embeddings**: **Python (FastAPI)** – Specialized services for NLP and vector generation.
 
-The `web` application communicates with the `api-server` to fetch data.
+### Data & Infrastructure
+*   **Analytical DB**: **ClickHouse** – Real-time trend analysis and growth tracking.
+*   **Primary DB**: **PostgreSQL** – Relational storage for repository metadata.
+*   **Vector DB**: **Qdrant** – AI-powered semantic similarity search.
+*   **Caching**: **Redis** – Low-latency data retrieval for the API.
+*   **Object Storage**: **MinIO** – S3-compatible storage for READMEs and assets.
+*   **Observability**: **OpenTelemetry** – Distributed tracing and system telemetry.
 
-## Deployment (Docker Swarm)
+## 📂 Microservices Overview
 
-This application is designed to be deployed as a Docker Swarm stack. This allows for easy scaling and management of the services.
+*   `cmd/api`: High-performance REST API.
+*   `cmd/crawler`: Concurrent metadata and content scraper.
+*   `cmd/processor`: Orchestrates data transformation and storage triggers.
+*   `cmd/embedding-service`: Generates vector embeddings for repository content.
+*   `cmd/similarity-engine-service`: Calculates semantic similarity scores.
+*   `cmd/social-poster`: Automated social media engagement (Twitter/X).
+*   `cmd/og-image-service`: Dynamic Open Graph image generation.
+*   `cmd/writer-service`: Batch-optimized data persistence.
+
+## ⚡️ Getting Started
 
 ### Prerequisites
+*   Docker & Docker Compose
+*   Go 1.23+
 
-- Docker Engine must be running in Swarm mode. If not, initialize it with:
-  ```bash
-  docker swarm init
-  ```
+### Installation & Deployment
 
-### Initial Deployment
-
-1.  **Build all service images:**
+1.  **Clone & Configure**:
     ```bash
-    docker compose build
+    git clone https://github.com/teomiscia/github-trending.git
+    cp .env.example .env # Configure your credentials
     ```
 
-2.  **Deploy the stack:**
+2.  **Orchestrate with Docker**:
     ```bash
-    docker stack deploy -c docker-compose.yml github-trending
+    docker-compose up -d --build
     ```
 
-### Development Workflow
+The entire stack is containerized and orchestrated via Docker Compose, including all databases, message brokers, and Go/Python microservices.
 
-#### Backend
+## 📖 Key API Endpoints
+*   `GET /repos/trending`: Retrieve growth-indexed trending repositories.
+*   `GET /repos/{id}/similar`: Semantic similarity search via Qdrant.
 
-When you make changes to a backend service's code, follow these steps to update the running application:
-
-1.  **Rebuild the image for the service you changed:**
-    ```bash
-    # Rebuild a specific service (e.g., api-server)
-    docker compose build api-server
-
-    # Or, to rebuild all services
-    docker compose build
-    ```
-
-2.  **Update the running stack:**
-    This command will perform a rolling update for the services with new images.
-    ```bash
-    docker stack deploy -c docker-compose.yml github-trending
-    ```
-
-#### Frontend (Web/Mobile)
-
-To run the frontend application for development:
-
-1.  **Navigate to the `web` directory:**
-    ```bash
-    cd web
-    ```
-
-2.  **Install dependencies:**
-    ```bash
-    npm install
-    ```
-
-3.  **Start the development server:**
-    ```bash
-    # For web
-    npm run web
-
-    # For iOS
-    npm run ios
-
-    # For Android
-    npm run android
-    ```
-4. **Build the production**
-
-    ```bash
-    npx expo export -p web
-    ```
-
-### Managing the Stack
-
--   **List all services in the stack:**
-    ```bash
-    docker stack services github-trending
-    ```
-
--   **View logs for a specific service:**
-    ```bash
-    docker service logs github-trending_api-server
-    ```
-
--   **Restart a single service:**
-    ```bash
-    docker service update --force github-trending_api-server
-    ```
-
--   **Remove the entire stack:**
-    ```bash
-    docker stack rm github-trending
-    ```
-
-## Project Structure
-
-Your project layout will look like this:
-
-```
-github-trending/
-├── .env
-├── docker-compose.yml
-├── go.mod
-├── go.sum
-├── web/
-│   ├── app/
-│   ├── components/
-│   ├── services/
-│   └── ...
-├── cmd/
-│   ├── api/
-│   ├── crawler/
-│   ├── discovery/
-│   ├── embedding-api-service/
-│   ├── embedding-autoscaler/
-│   ├── embedding-service/
-│   ├── processor/
-│   ├── scheduler/
-│   ├── similarity-engine-service/
-│   └── writer-service/
-├── internal/
-│   ├── api/
-│   ├── config/
-│   ├── database/
-│   ├── github/
-│   ├── messaging/
-│   └── models/
-└── storage/
-    ├── postgres/
-    │   └── schema.sql
-    └── clickhouse/
-        └── schema.sql
-```
