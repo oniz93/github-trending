@@ -25,6 +25,11 @@ import (
 	"github.com/teomiscia/github-trending/internal/models"
 )
 
+// defaultHTTPClient is used for outbound calls to internal services (OG image
+// and markup rendering). A timeout prevents a hung upstream from blocking an
+// API request handler indefinitely.
+var defaultHTTPClient = &http.Client{Timeout: 15 * time.Second}
+
 func NewServer(cfg *config.Config, redisClient *redis.Client, pgdb *database.PostgresConnection, chdb *database.ClickHouseConnection, minioConnection *database.MinioConnection) *gin.Engine {
 	router := gin.Default()
 
@@ -52,7 +57,7 @@ func handleGenerateOGImage(cfg *config.Config) gin.HandlerFunc {
 
 		ogImageServiceURL := "http://og-image-service:3000"
 
-		resp, err := http.Get(fmt.Sprintf("%s/?id=%s", ogImageServiceURL, repoID))
+		resp, err := defaultHTTPClient.Get(fmt.Sprintf("%s/?id=%s", ogImageServiceURL, repoID))
 		if err != nil {
 			errorResponse(c, http.StatusInternalServerError, "Failed to call OG image service", err, cfg.Debug)
 			return
@@ -450,7 +455,7 @@ func handleGetReadme(cfg *config.Config, redisClient *redis.Client, minioConnect
 			return
 		}
 
-		resp, err := http.Post("http://markup-service:80/markup", "application/json", bytes.NewBuffer(reqBody))
+		resp, err := defaultHTTPClient.Post("http://markup-service:80/markup", "application/json", bytes.NewBuffer(reqBody))
 		if err != nil {
 			errorResponse(c, http.StatusInternalServerError, "Failed to call markup service", err, cfg.Debug)
 			return
