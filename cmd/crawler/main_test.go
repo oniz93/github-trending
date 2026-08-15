@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/streadway/amqp"
+	amqp "github.com/rabbitmq/amqp091-go"
 	"github.com/teomiscia/github-trending/internal/github"
 	"github.com/teomiscia/github-trending/internal/models"
 )
@@ -124,10 +124,10 @@ func TestCrawlerIntegration(t *testing.T) {
 
 	// 6. Prepare the input message
 	sampleRepo := models.Repository{
-		ID:           13329152,
-		FullName:     "eugeneware/gifencoder",
+		ID:            13329152,
+		FullName:      "eugeneware/gifencoder",
 		DefaultBranch: "master",
-		PushedAt:     time.Date(2025, time.June, 6, 7, 9, 34, 0, time.UTC),
+		PushedAt:      time.Date(2025, time.June, 6, 7, 9, 34, 0, time.UTC),
 	}
 	discoveryMsg := models.DiscoveryMessage{
 		Repository:   sampleRepo,
@@ -140,7 +140,7 @@ func TestCrawlerIntegration(t *testing.T) {
 
 	// Simulate message consumption by pushing to the mock consume channel
 	mockMQConnection.consumeChan <- amqp.Delivery{
-		Body: msgBody,
+		Body:         msgBody,
 		Acknowledger: &mockAcknowledger{}, // Provide a mock acknowledger
 	}
 

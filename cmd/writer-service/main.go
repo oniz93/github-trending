@@ -5,8 +5,8 @@ import (
 	"log"
 	"time"
 
+	amqp "github.com/rabbitmq/amqp091-go"
 	"github.com/redis/go-redis/v9"
-	"github.com/streadway/amqp"
 	"github.com/teomiscia/github-trending/internal/config"
 	"github.com/teomiscia/github-trending/internal/database"
 	"github.com/teomiscia/github-trending/internal/messaging"

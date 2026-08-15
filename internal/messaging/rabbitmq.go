@@ -2,7 +2,7 @@ package messaging
 
 import (
 	"fmt"
-	"github.com/streadway/amqp"
+	amqp "github.com/rabbitmq/amqp091-go"
 )
 
 // MQConnection defines the interface for RabbitMQ connection operations.
@@ -83,10 +83,10 @@ func (c *Connection) Publish(queueName string, body []byte) error {
 	}
 
 	err = ch.Publish(
-		"",        // exchange
-		q.Name,    // routing key
-		false,     // mandatory
-		false,     // immediate
+		"",     // exchange
+		q.Name, // routing key
+		false,  // mandatory
+		false,  // immediate
 		amqp.Publishing{
 			ContentType: "application/json",
 			Body:        body,

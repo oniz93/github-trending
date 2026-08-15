@@ -18,8 +18,8 @@ require (
 	github.com/minio/minio-go/v7 v7.0.94
 	github.com/mitchellh/hashstructure v1.1.0
 	github.com/qdrant/go-client v1.14.1
+	github.com/rabbitmq/amqp091-go v1.13.0
 	github.com/redis/go-redis/v9 v9.0.5
-	github.com/streadway/amqp v1.1.0
 	google.golang.org/grpc v1.74.2
 )
 

@@ -12,7 +12,7 @@ import (
 	"time"
 
 	qdrant_go_client "github.com/qdrant/go-client/qdrant"
-	"github.com/streadway/amqp"
+	amqp "github.com/rabbitmq/amqp091-go"
 	"github.com/teomiscia/github-trending/internal/config"
 	"github.com/teomiscia/github-trending/internal/database"
 	"github.com/teomiscia/github-trending/internal/messaging"
