@@ -7,3 +7,4 @@ vendor
 gittok.dev-main
 web_old
 .DS_Store
+docker-compose.postiz.yml
