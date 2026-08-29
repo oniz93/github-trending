@@ -43,7 +43,7 @@ func main() {
 
 		err := mqConnection.Publish(crawlQueueName, []byte(repoURL))
 		if err != nil {
-			log.Printf("Failed to publish message: %v", err)
+			log.Fatalf("Failed to publish message: %v", err)
 		} else {
 			log.Printf("Published message to crawl: %s", repoURL)
 		}

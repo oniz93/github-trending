@@ -125,7 +125,7 @@ func fetchAllAndPublish(query string) {
 
 			err = mqConnection.Publish(crawlQueueName, repoJSON)
 			if err != nil {
-				log.Printf("Failed to publish message for %s: %v", repo.FullName, err)
+				log.Fatalf("Failed to publish message for %s: %v", repo.FullName, err)
 			} else {
 				log.Printf("Published message to crawl: %s", repo.FullName)
 			}

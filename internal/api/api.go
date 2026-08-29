@@ -26,7 +26,11 @@ import (
 )
 
 func NewServer(cfg *config.Config, redisClient *redis.Client, pgdb *database.PostgresConnection, chdb *database.ClickHouseConnection, minioConnection *database.MinioConnection) *gin.Engine {
+	if !cfg.Debug {
+		gin.SetMode(gin.ReleaseMode)
+	}
 	router := gin.Default()
+	router.SetTrustedProxies(nil)
 
 	// Add CORS middleware
 	corsConfig := cors.DefaultConfig()

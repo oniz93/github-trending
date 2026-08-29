@@ -165,7 +165,7 @@ func processRepository(repoID int64, qdrantConnection *database.QdrantConnection
 		} else {
 			err = mqConnection.Publish("readme_to_embed", embedMsgJSON)
 			if err != nil {
-				log.Printf("Failed to publish embed message for %d: %v", repoID, err)
+				log.Fatalf("Failed to publish embed message for %d: %v", repoID, err)
 			}
 		}
 		return

@@ -94,6 +94,8 @@ func main() {
 		for d := range msgs {
 			handleMessage(d, pgConnection, chConnection)
 		}
+		log.Println("Message channel closed. Exiting writer service.")
+		close(forever)
 	}()
 
 	<-forever

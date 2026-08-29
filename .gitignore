@@ -8,3 +8,9 @@ gittok.dev-main
 web_old
 .DS_Store
 docker-compose.postiz.yml
+
+# server-specific deployment files (contain secrets / HC Volume paths)
+docker-compose.yml
+clickhouse_cleanup.py
+venv/
+*.bkp2
