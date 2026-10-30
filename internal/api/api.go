@@ -249,30 +249,7 @@ func handleRetrieveList(cfg *config.Config, redisClient *redis.Client, pgdb *dat
 			}
 		}
 
-		if len(userHistoryRepoIDs) == 0 {
-			// --- Generic Trending Logic ---
-			trendingCacheKey := "trending_repo_ids_by_growth:30"
-			cachedTrending, err := redisClient.Get(c.Request.Context(), trendingCacheKey).Result()
-			if err == nil {
-				decompressed, err := decompress([]byte(cachedTrending))
-				if err == nil {
-					json.Unmarshal(decompressed, &recommendedRepoIDs)
-				}
-			}
-
-			if len(recommendedRepoIDs) == 0 {
-				trendingRepoIDs, err := chdb.GetTrendingRepositoryIDsByGrowth(30)
-				if err != nil {
-					errorResponse(c, http.StatusInternalServerError, "Failed to retrieve trending repository list from ClickHouse", err, cfg.Debug)
-					return
-				}
-				recommendedRepoIDs = trendingRepoIDs
-				jsonBytes, err := json.Marshal(recommendedRepoIDs)
-				if err == nil {
-					redisClient.Set(c.Request.Context(), trendingCacheKey, compress(jsonBytes), 24*time.Hour)
-				}
-			}
-		} else {
+		if len(userHistoryRepoIDs) > 0 {
 			// --- Personalized Recommendation Logic ---
 			candidateScores := make(map[int64]float64)
 			for _, historyRepoID := range userHistoryRepoIDs {
@@ -307,6 +284,34 @@ func handleRetrieveList(cfg *config.Config, redisClient *redis.Client, pgdb *dat
 			})
 			for _, sr := range scoredRepos {
 				recommendedRepoIDs = append(recommendedRepoIDs, sr.ID)
+			}
+		}
+
+		// Fall back to the generic trending list when the session has no
+		// history or when none of the viewed repositories have similarity data
+		// yet. Without this fallback an unembedded click yields an empty feed.
+		if len(recommendedRepoIDs) == 0 {
+			// --- Generic Trending Logic ---
+			trendingCacheKey := "trending_repo_ids_by_growth:30"
+			cachedTrending, err := redisClient.Get(c.Request.Context(), trendingCacheKey).Result()
+			if err == nil {
+				decompressed, err := decompress([]byte(cachedTrending))
+				if err == nil {
+					json.Unmarshal(decompressed, &recommendedRepoIDs)
+				}
+			}
+
+			if len(recommendedRepoIDs) == 0 {
+				trendingRepoIDs, err := chdb.GetTrendingRepositoryIDsByGrowth(30)
+				if err != nil {
+					errorResponse(c, http.StatusInternalServerError, "Failed to retrieve trending repository list from ClickHouse", err, cfg.Debug)
+					return
+				}
+				recommendedRepoIDs = trendingRepoIDs
+				jsonBytes, err := json.Marshal(recommendedRepoIDs)
+				if err == nil {
+					redisClient.Set(c.Request.Context(), trendingCacheKey, compress(jsonBytes), 24*time.Hour)
+				}
 			}
 		}
 
