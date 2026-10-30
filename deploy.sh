@@ -6,10 +6,18 @@ set -e
 echo "--- Building images ---"
 docker compose build
 
+# docker stack deploy does not interpolate variables from .env on its own.
+# Export the values used by docker-compose.yml without sourcing the whole file
+# (values such as LAST_UPDATE_CUT contain spaces).
+POSTGRES_USER="$(sed -n 's/^POSTGRES_USER=//p' .env)"
+POSTGRES_DB="$(sed -n 's/^POSTGRES_DB=//p' .env)"
+REDIS_PASSWORD="$(sed -n 's/^REDIS_PASSWORD=//p' .env)"
+export POSTGRES_USER POSTGRES_DB REDIS_PASSWORD
+
 echo "--- Deploying stack: github-trending ---"
-# --prune removes services no longer defined in the compose file
-# --with-registry-auth is useful if you use a private registry later
-docker stack deploy -c docker-compose.yml github-trending
+# --resolve-image never keeps locally built images local instead of trying to
+#   record registry digests for them.
+docker stack deploy --resolve-image never -c docker-compose.yml github-trending
 
 echo "--- Deployment status ---"
 docker stack services github-trending
