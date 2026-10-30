@@ -185,11 +185,11 @@ func (s *homepageSnapshotService) build() (*homepageSnapshot, error) {
 		repositoriesByID[int64(repo.Repository.ID)] = repo
 	}
 
-	latestStats, statsErr := s.chdb.GetLatestRepositoryStatsByIDs(repoIDs)
-	if statsErr != nil {
-		// Stats are important but not critical: a snapshot without them is
-		// still much better than no snapshot at all.
-		log.Printf("Failed to get latest stats for homepage snapshot: %v", statsErr)
+	latestStats, err := s.chdb.GetLatestRepositoryStatsByIDs(repoIDs)
+	if err != nil {
+		// A snapshot without stats would render zeroed star/fork counts, so
+		// fail the build and keep serving the previous snapshot instead.
+		return nil, fmt.Errorf("failed to get latest repository stats: %w", err)
 	}
 
 	entries := make([]homepageRepository, 0, len(repoIDs))

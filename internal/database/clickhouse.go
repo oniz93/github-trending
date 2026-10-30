@@ -170,14 +170,14 @@ func (ch *ClickHouseConnection) GetLatestRepositoryStatsByIDs(repoIDs []int64) (
 	query := `
 		SELECT
 			repository_id,
-			argMax(event_date, event_time) AS event_date,
-			argMax(event_time, event_time) AS event_time,
-			argMax(stargazers_count, event_time) AS stargazers_count,
-			argMax(watchers_count, event_time) AS watchers_count,
-			argMax(forks_count, event_time) AS forks_count,
-			argMax(open_issues_count, event_time) AS open_issues_count,
-			argMax(pushed_at, event_time) AS pushed_at,
-			argMax(score, event_time) AS score
+			argMax(event_date, event_time) AS latest_event_date,
+			argMax(event_time, event_time) AS latest_event_time,
+			argMax(stargazers_count, event_time) AS latest_stargazers_count,
+			argMax(watchers_count, event_time) AS latest_watchers_count,
+			argMax(forks_count, event_time) AS latest_forks_count,
+			argMax(open_issues_count, event_time) AS latest_open_issues_count,
+			argMax(pushed_at, event_time) AS latest_pushed_at,
+			argMax(score, event_time) AS latest_score
 		FROM repository_stats
 		WHERE repository_id IN (?)
 		GROUP BY repository_id
