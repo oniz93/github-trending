@@ -158,6 +158,60 @@ func (ch *ClickHouseConnection) GetRepositoryStats(repoID int64) ([]models.Repos
 	return stats, nil
 }
 
+// GetLatestRepositoryStatsByIDs retrieves the latest statistic for each of the
+// given repositories in a single query. It is used when building the homepage
+// snapshot so that we do not have to query ClickHouse once per repository.
+func (ch *ClickHouseConnection) GetLatestRepositoryStatsByIDs(repoIDs []int64) (map[int64]*models.RepositoryStat, error) {
+	stats := make(map[int64]*models.RepositoryStat, len(repoIDs))
+	if len(repoIDs) == 0 {
+		return stats, nil
+	}
+
+	query := `
+		SELECT
+			repository_id,
+			argMax(event_date, event_time) AS event_date,
+			argMax(event_time, event_time) AS event_time,
+			argMax(stargazers_count, event_time) AS stargazers_count,
+			argMax(watchers_count, event_time) AS watchers_count,
+			argMax(forks_count, event_time) AS forks_count,
+			argMax(open_issues_count, event_time) AS open_issues_count,
+			argMax(pushed_at, event_time) AS pushed_at,
+			argMax(score, event_time) AS score
+		FROM repository_stats
+		WHERE repository_id IN (?)
+		GROUP BY repository_id
+	`
+
+	rows, err := ch.DB.Query(query, repoIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var repoID int64
+		var stat models.RepositoryStat
+		if err := rows.Scan(
+			&repoID,
+			&stat.EventDate,
+			&stat.EventTime,
+			&stat.StargazersCount,
+			&stat.WatchersCount,
+			&stat.ForksCount,
+			&stat.OpenIssuesCount,
+			&stat.PushedAt,
+			&stat.Score,
+		); err != nil {
+			return nil, err
+		}
+		statCopy := stat
+		stats[repoID] = &statCopy
+	}
+
+	return stats, nil
+}
+
 // GetLatestRepositoryStat retrieves the latest statistic for a given repository from ClickHouse.
 func (ch *ClickHouseConnection) GetLatestRepositoryStat(repoID int64) (*models.RepositoryStat, error) {
 	row := ch.DB.QueryRow("SELECT event_date, event_time, stargazers_count, watchers_count, forks_count, open_issues_count, pushed_at, score FROM repository_stats WHERE repository_id = ? ORDER BY event_time DESC LIMIT 1", repoID)

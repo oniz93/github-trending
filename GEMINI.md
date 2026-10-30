@@ -15,7 +15,7 @@ The system is a microservices-based application designed to discover, analyze, a
 *   **`embedding-autoscaler` (Go):** A smart proxy that sits in front of the `embedding-api-service`. It dynamically scales the number of `embedding-api-service` instances from 0 to a configured maximum based on request load. It also load-balances requests among the running instances.
 *   **`embedding-service` (Go):** Consumes from the `readme_to_embed` queue. It fetches the README content from MinIO, calls the `embedding-api-service` (via the autoscaler) to get the embedding, and stores the resulting vector in the Qdrant vector database.
 *   **`similarity-engine-service` (Go):** Periodically calculates similarity scores between repositories. It fetches embeddings from Qdrant, computes similarity, and stores the results in Redis for fast access.
-*   **`api-server` (Go):** The public-facing API for the application. It handles user requests, queries the databases (PostgreSQL, ClickHouse, Redis) to get trending and personalized repository data, and returns the results as JSON.
+*   **`api-server` (Go):** The public-facing API for the application. It handles user requests, queries the databases (PostgreSQL, ClickHouse, Redis) to get trending and personalized repository data, and returns the results as JSON. It also keeps a precomputed trending homepage snapshot (top 200 repositories) in memory, Redis, and PostgreSQL, refreshed every `HOMEPAGE_SNAPSHOT_REFRESH_INTERVAL` (default `30m`). Sessions without personalization are served straight from that snapshot, so the first homepage load does not wait for the heavy ClickHouse growth query.
 *   **`web` (React Native/Expo):** A mobile and web application that provides a user interface for browsing trending repositories. It features a TikTok-style vertical scrolling feed and a detailed view with a rendered README.
 
 **Data Flow:**
@@ -69,6 +69,9 @@ CLICKHOUSE_DB=default
 REDIS_HOST=redis_cache
 REDIS_PORT=6379
 REDIS_PASSWORD=
+
+# Homepage snapshot refresh interval (default 30m)
+HOMEPAGE_SNAPSHOT_REFRESH_INTERVAL=30m
 
 # Qdrant Credentials
 QDRANT_HOST=qdrant_db

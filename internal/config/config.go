@@ -10,36 +10,37 @@ import (
 
 // Config holds application configuration.
 type Config struct {
-	RabbitMQURL              string
-	RabbitMQUser             string
-	RabbitMQPassword         string
-	GitHubToken              string
-	PostgresHost             string
-	PostgresUser             string
-	PostgresPassword         string
-	PostgresDB               string
-	MinioEndpoint            string
-	MinioRootUser            string
-	MinioRootPassword        string
-	ClickHouseHost           string
-	ClickHousePort           string
-	ClickHouseUser           string
-	ClickHousePassword       string
-	ClickHouseDB             string
-	RedisHost                string
-	RedisPort                string
-	RedisPassword            string
-	QdrantHost               string
-	QdrantPort               int
-	LastUpdateCut            time.Duration
-	SimilarityListSize       int
-	EmbeddingApiMaxInstances int
-	EmbeddingApiIdleTimeout  int
-	Debug                    bool
-	TwitterApiKey            string
-	TwitterApiSecretKey      string
-	TwitterAccessToken       string
-	TwitterAccessSecret      string
+	RabbitMQURL                     string
+	RabbitMQUser                    string
+	RabbitMQPassword                string
+	GitHubToken                     string
+	PostgresHost                    string
+	PostgresUser                    string
+	PostgresPassword                string
+	PostgresDB                      string
+	MinioEndpoint                   string
+	MinioRootUser                   string
+	MinioRootPassword               string
+	ClickHouseHost                  string
+	ClickHousePort                  string
+	ClickHouseUser                  string
+	ClickHousePassword              string
+	ClickHouseDB                    string
+	RedisHost                       string
+	RedisPort                       string
+	RedisPassword                   string
+	QdrantHost                      string
+	QdrantPort                      int
+	LastUpdateCut                   time.Duration
+	SimilarityListSize              int
+	EmbeddingApiMaxInstances        int
+	EmbeddingApiIdleTimeout         int
+	Debug                           bool
+	HomepageSnapshotRefreshInterval time.Duration
+	TwitterApiKey                   string
+	TwitterApiSecretKey             string
+	TwitterAccessToken              string
+	TwitterAccessSecret             string
 }
 
 // ParseDuration parses a duration string with support for "months".
@@ -97,37 +98,46 @@ func Load() (*Config, error) {
 
 	debug, _ := strconv.ParseBool(os.Getenv("DEBUG"))
 
+	homepageSnapshotRefresh := 30 * time.Minute
+	if refreshStr := os.Getenv("HOMEPAGE_SNAPSHOT_REFRESH_INTERVAL"); refreshStr != "" {
+		homepageSnapshotRefresh, err = time.ParseDuration(refreshStr)
+		if err != nil {
+			return nil, fmt.Errorf("invalid HOMEPAGE_SNAPSHOT_REFRESH_INTERVAL duration: %w", err)
+		}
+	}
+
 	config := &Config{
-		RabbitMQURL:              os.Getenv("RABBITMQ_URL"),
-		RabbitMQUser:             os.Getenv("RABBITMQ_DEFAULT_USER"),
-		RabbitMQPassword:         os.Getenv("RABBITMQ_DEFAULT_PASS"),
-		GitHubToken:              os.Getenv("GITHUB_TOKEN"),
-		PostgresHost:             os.Getenv("POSTGRES_HOST"),
-		PostgresUser:             os.Getenv("POSTGRES_USER"),
-		PostgresPassword:         os.Getenv("POSTGRES_PASSWORD"),
-		PostgresDB:               os.Getenv("POSTGRES_DB"),
-		MinioEndpoint:            os.Getenv("MINIO_ENDPOINT"),
-		MinioRootUser:            os.Getenv("MINIO_ROOT_USER"),
-		MinioRootPassword:        os.Getenv("MINIO_ROOT_PASSWORD"),
-		ClickHouseHost:           os.Getenv("CLICKHOUSE_HOST"),
-		ClickHousePort:           os.Getenv("CLICKHOUSE_PORT"),
-		ClickHouseUser:           os.Getenv("CLICKHOUSE_USER"),
-		ClickHousePassword:       os.Getenv("CLICKHOUSE_PASSWORD"),
-		ClickHouseDB:             os.Getenv("CLICKHOUSE_DB"),
-		RedisHost:                os.Getenv("REDIS_HOST"),
-		RedisPort:                os.Getenv("REDIS_PORT"),
-		RedisPassword:            os.Getenv("REDIS_PASSWORD"),
-		QdrantHost:               os.Getenv("QDRANT_HOST"),
-		QdrantPort:               qdrantPort,
-		LastUpdateCut:            lastUpdateCut,
-		SimilarityListSize:       similarityListSize,
-		EmbeddingApiMaxInstances: embeddingApiMaxInstances,
-		EmbeddingApiIdleTimeout:  embeddingApiIdleTimeout,
-		Debug:                    debug,
-		TwitterApiKey:            os.Getenv("TWITTER_API_KEY"),
-		TwitterApiSecretKey:      os.Getenv("TWITTER_API_SECRET_KEY"),
-		TwitterAccessToken:       os.Getenv("TWITTER_ACCESS_TOKEN"),
-		TwitterAccessSecret:      os.Getenv("TWITTER_ACCESS_SECRET"),
+		RabbitMQURL:                     os.Getenv("RABBITMQ_URL"),
+		RabbitMQUser:                    os.Getenv("RABBITMQ_DEFAULT_USER"),
+		RabbitMQPassword:                os.Getenv("RABBITMQ_DEFAULT_PASS"),
+		GitHubToken:                     os.Getenv("GITHUB_TOKEN"),
+		PostgresHost:                    os.Getenv("POSTGRES_HOST"),
+		PostgresUser:                    os.Getenv("POSTGRES_USER"),
+		PostgresPassword:                os.Getenv("POSTGRES_PASSWORD"),
+		PostgresDB:                      os.Getenv("POSTGRES_DB"),
+		MinioEndpoint:                   os.Getenv("MINIO_ENDPOINT"),
+		MinioRootUser:                   os.Getenv("MINIO_ROOT_USER"),
+		MinioRootPassword:               os.Getenv("MINIO_ROOT_PASSWORD"),
+		ClickHouseHost:                  os.Getenv("CLICKHOUSE_HOST"),
+		ClickHousePort:                  os.Getenv("CLICKHOUSE_PORT"),
+		ClickHouseUser:                  os.Getenv("CLICKHOUSE_USER"),
+		ClickHousePassword:              os.Getenv("CLICKHOUSE_PASSWORD"),
+		ClickHouseDB:                    os.Getenv("CLICKHOUSE_DB"),
+		RedisHost:                       os.Getenv("REDIS_HOST"),
+		RedisPort:                       os.Getenv("REDIS_PORT"),
+		RedisPassword:                   os.Getenv("REDIS_PASSWORD"),
+		QdrantHost:                      os.Getenv("QDRANT_HOST"),
+		QdrantPort:                      qdrantPort,
+		LastUpdateCut:                   lastUpdateCut,
+		SimilarityListSize:              similarityListSize,
+		EmbeddingApiMaxInstances:        embeddingApiMaxInstances,
+		EmbeddingApiIdleTimeout:         embeddingApiIdleTimeout,
+		Debug:                           debug,
+		HomepageSnapshotRefreshInterval: homepageSnapshotRefresh,
+		TwitterApiKey:                   os.Getenv("TWITTER_API_KEY"),
+		TwitterApiSecretKey:             os.Getenv("TWITTER_API_SECRET_KEY"),
+		TwitterAccessToken:              os.Getenv("TWITTER_ACCESS_TOKEN"),
+		TwitterAccessSecret:             os.Getenv("TWITTER_ACCESS_SECRET"),
 	}
 
 	if os.Getenv("LOCAL_ENV") == "true" {

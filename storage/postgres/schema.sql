@@ -75,6 +75,15 @@ CREATE TABLE IF NOT EXISTS repository_views (
     viewed_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE INDEX IF NOT EXISTS idx_repository_views_session_id
+    ON repository_views (session_id, viewed_at DESC);
+
+CREATE TABLE IF NOT EXISTS homepage_snapshots (
+    name TEXT PRIMARY KEY,
+    payload JSONB NOT NULL,
+    built_at TIMESTAMP WITH TIME ZONE NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS repository_similarity (
     id BIGINT PRIMARY KEY,
     data JSONB NOT NULL

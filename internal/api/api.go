@@ -37,7 +37,10 @@ func NewServer(cfg *config.Config, redisClient *redis.Client, pgdb *database.Pos
 	corsConfig.AllowAllOrigins = true
 	router.Use(cors.New(corsConfig))
 
-	router.GET("/retrieveList", handleRetrieveList(cfg, redisClient, pgdb, chdb))
+	homepageSnapshots := newHomepageSnapshotService(cfg.HomepageSnapshotRefreshInterval, redisClient, pgdb, chdb)
+	homepageSnapshots.Start(context.Background())
+
+	router.GET("/retrieveList", handleRetrieveList(cfg, redisClient, pgdb, chdb, homepageSnapshots))
 	router.POST("/trackOpenRepository", handleTrackOpenRepository(cfg, redisClient, pgdb))
 	router.GET("/getReadme", handleGetReadme(cfg, redisClient, minioConnection))
 	router.GET("/repository/:id", handleGetRepositoryDetails(cfg, redisClient, pgdb, chdb))
@@ -147,7 +150,7 @@ func decompress(data []byte) ([]byte, error) {
 	return snappy.Decode(nil, data)
 }
 
-func handleRetrieveList(cfg *config.Config, redisClient *redis.Client, pgdb *database.PostgresConnection, chdb *database.ClickHouseConnection) gin.HandlerFunc {
+func handleRetrieveList(cfg *config.Config, redisClient *redis.Client, pgdb *database.PostgresConnection, chdb *database.ClickHouseConnection, homepageSnapshots *homepageSnapshotService) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		originalSessionID := c.Query("sessionId")
 		isNewSession := originalSessionID == ""
@@ -201,12 +204,49 @@ func handleRetrieveList(cfg *config.Config, redisClient *redis.Client, pgdb *dat
 		}
 		// --- End of Cache Check ---
 
+		if page < 0 {
+			page = 0
+		}
+
+		hasFilters := len(languages) > 0 || len(tags) > 0 || len(topics) > 0
+
 		var recommendedRepoIDs []int64
 
-		// 1. Query the repository_views table for user history
-		userHistoryRepoIDs, err := pgdb.GetRecentClickedRepositoryIDs(sessionID, 15)
-		if err != nil {
-			log.Printf("Failed to get user history from Postgres: %v", err)
+		// Serve the precomputed trending snapshot when the session has not
+		// viewed anything yet. Opening a repository adds it to the Redis seen
+		// set, so an empty set means there is no personalization to build and
+		// the snapshot is exactly what this request would have computed. This
+		// makes the first homepage load instant instead of waiting for the
+		// ClickHouse growth query.
+		if homepageSnapshots != nil && !hasFilters {
+			// A brand-new session cannot have viewed anything yet, so skip the
+			// Redis lookup in the most common first-load case.
+			hasSeenRepositories := false
+			if !isNewSession {
+				seenRepoIDs, _ := redisClient.SMembers(c.Request.Context(), sessionID).Result()
+				hasSeenRepositories = len(seenRepoIDs) > 0
+			}
+
+			if !hasSeenRepositories {
+				if snapshotRepos, ok := homepageSnapshots.Page(page); ok {
+					c.JSON(http.StatusOK, gin.H{
+						"sessionId":    sessionID,
+						"repositories": snapshotRepos,
+					})
+					return
+				}
+			}
+		}
+
+		// 1. Query the repository_views table for user history. A brand-new
+		// session cannot have history, so skip the query entirely: on a large
+		// repository_views table this lookup can be expensive.
+		var userHistoryRepoIDs []int64
+		if !isNewSession {
+			userHistoryRepoIDs, err = pgdb.GetRecentClickedRepositoryIDs(sessionID, 15)
+			if err != nil {
+				log.Printf("Failed to get user history from Postgres: %v", err)
+			}
 		}
 
 		if len(userHistoryRepoIDs) == 0 {
@@ -271,7 +311,7 @@ func handleRetrieveList(cfg *config.Config, redisClient *redis.Client, pgdb *dat
 		}
 
 		// Filter if needed
-		if len(languages) > 0 || len(tags) > 0 || len(topics) > 0 {
+		if hasFilters {
 			keyBuilder := strings.Builder{}
 			for _, id := range recommendedRepoIDs {
 				keyBuilder.WriteString(strconv.FormatInt(id, 10))
@@ -314,7 +354,7 @@ func handleRetrieveList(cfg *config.Config, redisClient *redis.Client, pgdb *dat
 		}
 
 		// Paginate
-		pageSize := 50
+		pageSize := homepageSnapshotPageSize
 		start := page * pageSize
 		end := start + pageSize
 		if start > len(finalRepoIDs) {
@@ -351,14 +391,20 @@ func handleRetrieveList(cfg *config.Config, redisClient *redis.Client, pgdb *dat
 					}
 				}
 			} else {
-				stats, err := chdb.GetRepositoryStats(int64(repo.Repository.ID))
+				// Only the latest stat is used below, so ask ClickHouse for a
+				// single row instead of the whole history of the repository.
+				latestStat, err := chdb.GetLatestRepositoryStat(int64(repo.Repository.ID))
 				if err != nil {
 					log.Printf("Failed to get stats for repository %d from ClickHouse: %v", repo.Repository.ID, err)
 				} else {
-					if len(stats) > 0 {
-						lastStat = &stats[len(stats)-1]
+					statsToCache := []models.RepositoryStat{}
+					if latestStat != nil {
+						lastStat = latestStat
+						statsToCache = append(statsToCache, *latestStat)
 					}
-					jsonBytes, err := json.Marshal(stats)
+					// Keep the cache shape expected by the code above and by
+					// the homepage snapshot warmer (a []RepositoryStat).
+					jsonBytes, err := json.Marshal(statsToCache)
 					if err == nil {
 						redisClient.Set(c.Request.Context(), statsCacheKey, compress(jsonBytes), 12*time.Hour)
 					}

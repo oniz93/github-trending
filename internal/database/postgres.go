@@ -810,3 +810,42 @@ func (pc *PostgresConnection) MarkRepositoryAsPosted(repoID int64) error {
 	return err
 }
 
+// EnsureHomepageSnapshotTable creates the table used to persist precomputed
+// homepage snapshots. It is intentionally idempotent so that the API can boot
+// against an already initialized database.
+func (pc *PostgresConnection) EnsureHomepageSnapshotTable() error {
+	_, err := pc.DB.Exec(`
+		CREATE TABLE IF NOT EXISTS homepage_snapshots (
+			name TEXT PRIMARY KEY,
+			payload JSONB NOT NULL,
+			built_at TIMESTAMP WITH TIME ZONE NOT NULL
+		)
+	`)
+	return err
+}
+
+// SaveHomepageSnapshot persists a precomputed homepage snapshot so that it can
+// be served immediately after a restart or a Redis flush.
+func (pc *PostgresConnection) SaveHomepageSnapshot(name string, payload []byte, builtAt time.Time) error {
+	_, err := pc.DB.Exec(`
+		INSERT INTO homepage_snapshots (name, payload, built_at)
+		VALUES ($1, $2::jsonb, $3)
+		ON CONFLICT (name) DO UPDATE
+		SET payload = EXCLUDED.payload, built_at = EXCLUDED.built_at
+	`, name, string(payload), builtAt)
+	return err
+}
+
+// GetHomepageSnapshot loads a persisted homepage snapshot.
+func (pc *PostgresConnection) GetHomepageSnapshot(name string) ([]byte, time.Time, error) {
+	var payload []byte
+	var builtAt time.Time
+	err := pc.DB.QueryRow(
+		"SELECT payload, built_at FROM homepage_snapshots WHERE name = $1",
+		name,
+	).Scan(&payload, &builtAt)
+	if err != nil {
+		return nil, time.Time{}, err
+	}
+	return payload, builtAt, nil
+}
