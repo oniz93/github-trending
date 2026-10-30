@@ -14,9 +14,10 @@ import (
 )
 
 const (
-	maxRetries     = 5
-	retryDelay     = 5 * time.Second
-	writeQueueName = "repos_to_write"
+	maxRetries               = 5
+	retryDelay               = 5 * time.Second
+	writeQueueName           = "repos_to_write"
+	writeDeadLetterQueueName = "repos_to_write_dlq"
 )
 
 func main() {
@@ -92,7 +93,7 @@ func main() {
 
 	go func() {
 		for d := range msgs {
-			handleMessage(d, pgConnection, chConnection)
+			handleMessage(d, mqConnection, pgConnection, chConnection)
 		}
 		log.Println("Message channel closed. Exiting writer service.")
 		close(forever)
@@ -101,7 +102,7 @@ func main() {
 	<-forever
 }
 
-func handleMessage(d amqp.Delivery, pgConnection *database.PostgresConnection, chConnection *database.ClickHouseConnection) {
+func handleMessage(d amqp.Delivery, mqConnection messaging.MQConnection, pgConnection *database.PostgresConnection, chConnection *database.ClickHouseConnection) {
 	var crawlResult models.CrawlResult
 	if err := json.Unmarshal(d.Body, &crawlResult); err != nil {
 		log.Printf("Failed to unmarshal message: %v", err)
@@ -113,6 +114,21 @@ func handleMessage(d amqp.Delivery, pgConnection *database.PostgresConnection, c
 
 	if err := pgConnection.InsertRepository(crawlResult.Repository, crawlResult.CrawledAt); err != nil {
 		log.Printf("Failed to insert repository into PostgreSQL: %v", err)
+
+		// Unique/foreign-key conflicts are permanent: retrying the same
+		// payload can never succeed and would block the queue forever.
+		if database.IsConstraintViolation(err) {
+			if pubErr := mqConnection.Publish(writeDeadLetterQueueName, d.Body); pubErr != nil {
+				log.Printf("Failed to move message to dead-letter queue %s: %v", writeDeadLetterQueueName, pubErr)
+				d.Nack(false, true)
+				return
+			}
+
+			log.Printf("Moved message for %s to dead-letter queue %s after a constraint violation", crawlResult.Repository.FullName, writeDeadLetterQueueName)
+			d.Ack(false)
+			return
+		}
+
 		d.Nack(false, true) // Nack and requeue for another attempt
 		return
 	}

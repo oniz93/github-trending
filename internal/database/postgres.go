@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -62,6 +63,18 @@ func NewPostgresConnection(host, port, user, password, dbname string) (*Postgres
 // Close closes the database connection.
 func (pc *PostgresConnection) Close() error {
 	return pc.DB.Close()
+}
+
+// IsConstraintViolation reports whether err is a PostgreSQL integrity
+// constraint violation (unique, foreign key, check, etc.). Retrying such a
+// message will never succeed without changing the data, so callers should move
+// it aside instead of requeueing it forever.
+func IsConstraintViolation(err error) bool {
+	var pqErr *pq.Error
+	if errors.As(err, &pqErr) {
+		return string(pqErr.Code.Class()) == "23"
+	}
+	return false
 }
 
 // TrackRepositoryView inserts a record of a repository view into the database.
@@ -267,16 +280,16 @@ func (pc *PostgresConnection) InsertRepository(repo models.Repository, lastCrawl
 	}
 	defer tx.Rollback() // Rollback is a no-op if the transaction is committed.
 
-	// Insert owner if not present.
-	_, err = tx.Exec(`
-		INSERT INTO owners (id, login, avatar_url, html_url, type)
-		VALUES ($1, $2, $3, $4, $5)
-		ON CONFLICT (id) DO NOTHING
-	`, repo.Owner.ID, repo.Owner.Login, repo.Owner.AvatarURL, repo.Owner.HTMLURL, repo.Owner.Type)
+	// Resolve the owner. GitHub account IDs are normally stable, but an
+	// account can be deleted and recreated with the same login. The owners
+	// table is unique on both id and login, so "ON CONFLICT (id)" alone can
+	// still fail on owners_login_key.
+	ownerID, err := resolveOwner(tx, repo.Owner)
 	if err != nil {
-		log.Printf("Failed to insert owner: %v", err)
+		log.Printf("Failed to upsert owner: %v", err)
 		return err
 	}
+	repo.Owner.ID = int(ownerID)
 
 	// Insert or update license, only updating if data has changed.
 	if repo.License.Key.Valid {
@@ -296,6 +309,33 @@ func (pc *PostgresConnection) InsertRepository(repo models.Repository, lastCrawl
 			log.Printf("Failed to insert license: %v", err)
 			return err
 		}
+	}
+
+	// GitHub repository IDs are stable, but a repository can be deleted and
+	// recreated with the same full_name. Because full_name is unique, an
+	// insert for the new id would fail forever. Treat the old row as stale
+	// and remove it; tag/topic/language rows cascade with the repository.
+	var staleRepoID int64
+	err = tx.QueryRow(
+		"SELECT id FROM repositories WHERE full_name = $1 AND id <> $2",
+		repo.FullName, repo.ID,
+	).Scan(&staleRepoID)
+	if err == nil {
+		log.Printf("Repository %s was recreated: removing stale row %d (new id %d)", repo.FullName, staleRepoID, repo.ID)
+		for _, query := range []string{
+			"DELETE FROM repository_views WHERE repository_id = $1",
+			"DELETE FROM repository_similarity WHERE id = $1",
+			"DELETE FROM posted_repositories WHERE repository_id = $1",
+		} {
+			if _, err := tx.Exec(query, staleRepoID); err != nil {
+				return err
+			}
+		}
+		if _, err := tx.Exec("DELETE FROM repositories WHERE id = $1", staleRepoID); err != nil {
+			return err
+		}
+	} else if err != sql.ErrNoRows {
+		return err
 	}
 
 	// Insert or update repository.
@@ -397,6 +437,46 @@ func (pc *PostgresConnection) InsertRepository(repo models.Repository, lastCrawl
 	}
 
 	return nil
+}
+
+// resolveOwner returns the local owner ID, handling the case where GitHub
+// recreated an account with the same login but a different ID.
+func resolveOwner(tx *sql.Tx, owner models.Owner) (int64, error) {
+	var existingID int64
+
+	err := tx.QueryRow("SELECT id FROM owners WHERE id = $1", owner.ID).Scan(&existingID)
+	if err == nil {
+		_, err = tx.Exec(`
+			UPDATE owners SET avatar_url = $1, html_url = $2, type = $3 WHERE id = $4
+		`, owner.AvatarURL, owner.HTMLURL, owner.Type, existingID)
+		return existingID, err
+	}
+	if err != sql.ErrNoRows {
+		return 0, err
+	}
+
+	// The account may have been recreated with a new ID but the same login.
+	// Keep the existing row so existing repositories.owner_id values remain valid.
+	err = tx.QueryRow("SELECT id FROM owners WHERE login = $1", owner.Login).Scan(&existingID)
+	if err == nil {
+		_, err = tx.Exec(`
+			UPDATE owners SET avatar_url = $1, html_url = $2, type = $3 WHERE id = $4
+		`, owner.AvatarURL, owner.HTMLURL, owner.Type, existingID)
+		return existingID, err
+	}
+	if err != sql.ErrNoRows {
+		return 0, err
+	}
+
+	_, err = tx.Exec(`
+		INSERT INTO owners (id, login, avatar_url, html_url, type)
+		VALUES ($1, $2, $3, $4, $5)
+	`, owner.ID, owner.Login, owner.AvatarURL, owner.HTMLURL, owner.Type)
+	if err != nil {
+		return 0, err
+	}
+
+	return int64(owner.ID), nil
 }
 
 // GetRepositoryByID retrieves a repository by its ID.
