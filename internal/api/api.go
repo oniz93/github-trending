@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -102,7 +103,7 @@ func handleGetRepositoryDetails(cfg *config.Config, redisClient *redis.Client, p
 
 		repoData, err := pgdb.GetRepositoryByID(repoID)
 		if err != nil {
-			if err == sql.ErrNoRows {
+			if errors.Is(err, sql.ErrNoRows) {
 				errorResponse(c, http.StatusNotFound, "Repository not found", err, cfg.Debug)
 			} else {
 				errorResponse(c, http.StatusInternalServerError, "Failed to retrieve repository data", err, cfg.Debug)
