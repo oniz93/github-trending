@@ -1,14 +1,14 @@
 {
   "name": "og-image-service",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Generates Open Graph images for GitHub repositories.",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
-    "axios": "*",
-    "express": "*",
-    "puppeteer": "*"
+    "axios": "^1.7.7",
+    "express": "^4.21.1",
+    "puppeteer-core": "^25.16.0"
   }
 }

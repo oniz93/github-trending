@@ -1,5 +1,5 @@
 const express = require('express');
-const puppeteer = require('puppeteer');
+const puppeteer = require('puppeteer-core');
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
@@ -7,8 +7,136 @@ const path = require('path');
 const app = express();
 const port = 3000;
 
-const API_SERVER_URL = 'http://api-server:8080';
+const API_SERVER_URL = process.env.API_SERVER_URL || 'http://api-server:8080';
 const LOGO_PATH = './assets/logo.png';
+
+// --- Rendering: one long-lived Obscura instance over CDP --------------------
+// The old code did puppeteer.launch() per request: ~1.3 s of launch inside a
+// ~3.4 s render, and a burst left orphaned browsers behind (895 MiB of them).
+// Obscura renders this card in ~0.2 s warm and its output is byte-stable
+// across platforms, because it ships its own fonts.
+const CDP_URL = (process.env.OBSCURA_CDP_URL || 'http://obscura:9222').replace(/\/$/, '');
+// Obscura refuses a non-loopback bind without a >=32-byte bearer token; the same
+// token must ride the HTTP discovery call and the WebSocket handshake.
+const CDP_TOKEN = process.env.OBSCURA_CDP_TOKEN || '';
+function cdpHeaders() {
+    return CDP_TOKEN ? { Authorization: `Bearer ${CDP_TOKEN}` } : {};
+}
+const VIEWPORT = { width: 1200, height: 630 };
+const RENDER_CONCURRENCY = Number(process.env.OG_RENDER_CONCURRENCY || 4);
+const CACHE_TTL_MS = Number(process.env.OG_CACHE_TTL_MS || 10 * 60 * 1000);
+const CACHE_MAX_ENTRIES = Number(process.env.OG_CACHE_MAX || 256);
+
+let browserPromise = null;
+let connectingPromise = null;
+function isBrowserAlive(browser) {
+    // puppeteer-core >= 23 dropped Browser.isConnected() in favour of the
+    // `connected` getter; support both so an upgrade cannot break rendering.
+    return typeof browser.isConnected === 'function' ? browser.isConnected() : Boolean(browser.connected);
+}
+
+async function resolveWsEndpoint() {
+    // obscura may still be starting up; retry for ~30 s before giving up
+    for (let attempt = 0; attempt < 60; attempt++) {
+        try {
+            const res = await axios.get(`${CDP_URL}/json/version`, { timeout: 2000, headers: cdpHeaders() });
+            if (res.data && res.data.webSocketDebuggerUrl) {
+                // obscura advertises ws://127.0.0.1:9222/... regardless of --host, so
+                // rewrite the authority to the host we actually reach it on.
+                const base = new URL(CDP_URL);
+                const ws = new URL(res.data.webSocketDebuggerUrl);
+                ws.hostname = base.hostname;
+                ws.port = base.port || ws.port;
+                return ws.toString();
+            }
+        } catch (_) { /* not up yet */ }
+        await new Promise(r => setTimeout(r, 500));
+    }
+    throw new Error(`Obscura CDP endpoint not reachable at ${CDP_URL}`);
+}
+
+async function getBrowser() {
+    if (browserPromise) {
+        try {
+            const browser = await browserPromise;
+            if (isBrowserAlive(browser)) return browser;
+        } catch (_) { /* reconnect below */ }
+        browserPromise = null;
+    }
+    if (!connectingPromise) {
+        connectingPromise = (async () => {
+            const ws = await resolveWsEndpoint();
+            const browser = await puppeteer.connect({
+                browserWSEndpoint: ws,
+                headers: cdpHeaders(),
+                defaultViewport: null,
+            });
+            browser.on('disconnected', () => { browserPromise = null; });
+            return browser;
+        })().finally(() => { connectingPromise = null; });
+    }
+    browserPromise = connectingPromise;
+    return browserPromise;
+}
+
+// Bounds how many pages a crawler burst can open at once (Twitterbot sent 11).
+let activeRenders = 0;
+const renderQueue = [];
+async function acquireSlot() {
+    if (activeRenders >= RENDER_CONCURRENCY) {
+        await new Promise(resolve => renderQueue.push(resolve));
+    }
+    activeRenders++;
+}
+function releaseSlot() {
+    activeRenders--;
+    const next = renderQueue.shift();
+    if (next) next();
+}
+
+async function renderCard(html) {
+    const browser = await getBrowser();
+    let page = null;
+    try {
+        page = await browser.newPage();
+        await page.setViewport(VIEWPORT);
+        // Obscura's CDP does not implement Page.setDocumentContent, so
+        // page.setContent() fails with "Unknown Page method: setDocumentContent".
+        // Navigating to a data: URL produces the identical image.
+        const dataUrl = 'data:text/html;base64,' + Buffer.from(html, 'utf-8').toString('base64');
+        await page.goto(dataUrl, { waitUntil: 'load', timeout: 20000 });
+        // puppeteer-core 25 returns a Uint8Array, which Express would serialise as
+        // JSON ({0:137,1:80,...}) instead of sending a PNG. Normalise to a Buffer.
+        return Buffer.from(await page.screenshot({ type: 'png' }));
+    } finally {
+        if (page) { try { await page.close(); } catch (_) { /* already gone */ } }
+    }
+}
+
+const cardCache = new Map();   // id -> { png, at }
+function cacheGet(id) {
+    const hit = cardCache.get(id);
+    if (!hit) return null;
+    if (Date.now() - hit.at > CACHE_TTL_MS) { cardCache.delete(id); return null; }
+    return hit.png;
+}
+function cacheSet(id, png) {
+    if (cardCache.size >= CACHE_MAX_ENTRIES) {
+        const oldest = cardCache.keys().next().value;
+        if (oldest !== undefined) cardCache.delete(oldest);
+    }
+    cardCache.set(id, { png, at: Date.now() });
+}
+
+app.get('/health', async (req, res) => {
+    try {
+        const browser = await getBrowser();
+        if (!isBrowserAlive(browser)) throw new Error('CDP connection lost');
+        res.json({ ok: true, cached: cardCache.size, renders: activeRenders });
+    } catch (error) {
+        res.status(503).json({ ok: false, error: error.message });
+    }
+});
 
 app.get('/', async (req, res) => {
     const { id } = req.query;
@@ -17,6 +145,13 @@ app.get('/', async (req, res) => {
     }
 
     try {
+        const cached = cacheGet(id);
+        if (cached) {
+            res.setHeader('Content-Type', 'image/png');
+            res.setHeader('X-OG-Cache', 'hit');
+            return res.send(cached);
+        }
+
         // 1. Fetch Data
         const repoDetailsResponse = await axios.get(`${API_SERVER_URL}/repository/${id}`);
         const { repository } = repoDetailsResponse.data;
@@ -33,18 +168,18 @@ app.get('/', async (req, res) => {
         const html = getHtml(repository, readmeHtml);
 
         // 3. Generate Image
-        const browser = await puppeteer.launch({
-            executablePath: process.env.PUPPETEER_EXECUTABLE_PATH,
-            args: ['--no-sandbox', '--disable-setuid-sandbox'],
-        });
-        const page = await browser.newPage();
-        await page.setViewport({ width: 1200, height: 630 });
-        await page.setContent(html, { waitUntil: 'networkidle0' });
-        const screenshot = await page.screenshot({ type: 'png' });
-        await browser.close();
+        let screenshot;
+        await acquireSlot();
+        try {
+            screenshot = await renderCard(html);
+        } finally {
+            releaseSlot();
+        }
+        cacheSet(id, screenshot);
 
         // 4. Return Image
         res.setHeader('Content-Type', 'image/png');
+        res.setHeader('X-OG-Cache', 'miss');
         res.send(screenshot);
 
     } catch (error) {
