@@ -24,9 +24,10 @@ type CrawlResult struct {
 
 // ReadmeEmbedMessage is the message that triggers README embedding.
 type ReadmeEmbedMessage struct {
-	RepositoryID int64  `json:"repository_id"`
-	MinioPath    string `json:"minio_path"`
-	DownloadURL  string `json:"download_url"`
+	RepositoryID int64 `json:"repository_id"`
+	// ObjectPath keeps its legacy JSON name so in-flight queue messages stay compatible.
+	ObjectPath  string `json:"minio_path"`
+	DownloadURL string `json:"download_url"`
 }
 
 type Repository struct {

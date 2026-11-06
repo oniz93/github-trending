@@ -52,17 +52,17 @@ func main() {
 	}
 	defer pgConnection.DB.Close()
 
-	var minioConnection *database.MinioConnection
+	var objectStore *database.S3Connection
 	for i := 0; i < maxRetries; i++ {
-		minioConnection, err = database.NewMinioConnection(cfg.MinioEndpoint, cfg.MinioRootUser, cfg.MinioRootPassword)
+		objectStore, err = database.NewS3Connection(cfg.S3Endpoint, cfg.S3AccessKey, cfg.S3SecretKey, cfg.S3Bucket)
 		if err == nil {
 			break
 		}
-		log.Printf("Failed to connect to MinIO: %v. Retrying in %v...", err, retryDelay)
+		log.Printf("Failed to connect to S3 object store: %v. Retrying in %v...", err, retryDelay)
 		time.Sleep(retryDelay)
 	}
 	if err != nil {
-		log.Fatalf("Failed to connect to MinIO after %d retries: %v", maxRetries, err)
+		log.Fatalf("Failed to connect to S3 object store after %d retries: %v", maxRetries, err)
 	}
 
 	var qdrantConnection *database.QdrantConnection
@@ -90,7 +90,7 @@ func main() {
 
 	for i := 1; i <= numWorkers; i++ {
 		wg.Add(1)
-		go worker(i, &wg, jobs, pgConnection, minioConnection, qdrantConnection)
+		go worker(i, &wg, jobs, pgConnection, objectStore, qdrantConnection)
 	}
 
 	log.Printf("Embedding service started. Waiting for messages on queue: %s", queueName)
@@ -147,7 +147,7 @@ func main() {
 	}
 }
 
-func worker(id int, wg *sync.WaitGroup, jobs <-chan amqp.Delivery, pgConnection *database.PostgresConnection, minioConnection *database.MinioConnection, qdrantConnection *database.QdrantConnection) {
+func worker(id int, wg *sync.WaitGroup, jobs <-chan amqp.Delivery, pgConnection *database.PostgresConnection, objectStore database.ObjectStore, qdrantConnection *database.QdrantConnection) {
 	defer wg.Done()
 	for j := range jobs {
 		var embedMsg models.ReadmeEmbedMessage
@@ -158,7 +158,7 @@ func worker(id int, wg *sync.WaitGroup, jobs <-chan amqp.Delivery, pgConnection 
 		}
 
 		log.Printf("Worker %d: Received message for repository ID: %d", id, embedMsg.RepositoryID)
-		processMessage(id, embedMsg, pgConnection, minioConnection, qdrantConnection)
+		processMessage(id, embedMsg, pgConnection, objectStore, qdrantConnection)
 		j.Ack(false) // Ack the message
 		log.Printf("Worker %d: Finished processing message for repository ID: %d", id, embedMsg.RepositoryID)
 	}
@@ -168,7 +168,7 @@ func processMessage(
 	id int,
 	embedMsg models.ReadmeEmbedMessage,
 	pgConnection *database.PostgresConnection,
-	minioConnection *database.MinioConnection,
+	objectStore database.ObjectStore,
 	qdrantConnection *database.QdrantConnection,
 ) {
 	// Explicitly nil the slice after use to help the GC
@@ -178,9 +178,9 @@ func processMessage(
 		runtime.GC()
 	}()
 
-	readmeContent, err := minioConnection.GetFile(context.Background(), embedMsg.MinioPath)
+	readmeContent, err := objectStore.GetFile(context.Background(), embedMsg.ObjectPath)
 	if err != nil {
-		log.Printf("Worker %d: Failed to get README from MinIO for %s: %v", id, embedMsg.MinioPath, err)
+		log.Printf("Worker %d: Failed to get README from object store for %s: %v", id, embedMsg.ObjectPath, err)
 		if embedMsg.DownloadURL != "" {
 			log.Printf("Worker %d: Attempting to download README from %s", id, embedMsg.DownloadURL)
 			resp, httpErr := http.Get(embedMsg.DownloadURL)
@@ -195,11 +195,11 @@ func processMessage(
 				return
 			}
 			reader := bytes.NewReader(readmeContent)
-			_, err := minioConnection.UploadFile(context.Background(), embedMsg.MinioPath, reader, int64(len(readmeContent)), "text/markdown")
+			err := objectStore.UploadFile(context.Background(), embedMsg.ObjectPath, reader, int64(len(readmeContent)), "text/markdown")
 			if err != nil {
-				log.Printf("Worker %d: Failed to upload downloaded README to MinIO for %s: %v", id, embedMsg.MinioPath, err)
+				log.Printf("Worker %d: Failed to upload downloaded README to object store for %s: %v", id, embedMsg.ObjectPath, err)
 			} else {
-				log.Printf("Worker %d: Successfully cached README for %s in MinIO", id, embedMsg.MinioPath)
+				log.Printf("Worker %d: Successfully cached README for %s in object store", id, embedMsg.ObjectPath)
 			}
 		} else {
 			log.Printf("Worker %d: No README URL available for repo %d, skipping embedding.", id, embedMsg.RepositoryID)

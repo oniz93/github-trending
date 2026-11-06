@@ -18,9 +18,10 @@ type Config struct {
 	PostgresUser                    string
 	PostgresPassword                string
 	PostgresDB                      string
-	MinioEndpoint                   string
-	MinioRootUser                   string
-	MinioRootPassword               string
+	S3Endpoint                      string
+	S3AccessKey                     string
+	S3SecretKey                     string
+	S3Bucket                        string
 	ClickHouseHost                  string
 	ClickHousePort                  string
 	ClickHouseUser                  string
@@ -62,6 +63,16 @@ func ParseDuration(durationStr string) (time.Duration, error) {
 		return time.Duration(years) * 365 * 24 * time.Hour, nil
 	}
 	return time.ParseDuration(durationStr)
+}
+
+// s3Settings returns the object store endpoint and credentials. The S3_*
+// variables win when S3_ENDPOINT is set; otherwise the legacy MINIO_* set is
+// used as a whole, so the two sets are never mixed during a migration.
+func s3Settings() (endpoint, accessKey, secretKey string) {
+	if endpoint = os.Getenv("S3_ENDPOINT"); endpoint != "" {
+		return endpoint, os.Getenv("S3_ACCESS_KEY"), os.Getenv("S3_SECRET_KEY")
+	}
+	return os.Getenv("MINIO_ENDPOINT"), os.Getenv("MINIO_ROOT_USER"), os.Getenv("MINIO_ROOT_PASSWORD")
 }
 
 // Load loads configuration from the environment.
@@ -106,6 +117,8 @@ func Load() (*Config, error) {
 		}
 	}
 
+	s3Endpoint, s3AccessKey, s3SecretKey := s3Settings()
+
 	config := &Config{
 		RabbitMQURL:                     os.Getenv("RABBITMQ_URL"),
 		RabbitMQUser:                    os.Getenv("RABBITMQ_DEFAULT_USER"),
@@ -115,9 +128,10 @@ func Load() (*Config, error) {
 		PostgresUser:                    os.Getenv("POSTGRES_USER"),
 		PostgresPassword:                os.Getenv("POSTGRES_PASSWORD"),
 		PostgresDB:                      os.Getenv("POSTGRES_DB"),
-		MinioEndpoint:                   os.Getenv("MINIO_ENDPOINT"),
-		MinioRootUser:                   os.Getenv("MINIO_ROOT_USER"),
-		MinioRootPassword:               os.Getenv("MINIO_ROOT_PASSWORD"),
+		S3Endpoint:                      s3Endpoint,
+		S3AccessKey:                     s3AccessKey,
+		S3SecretKey:                     s3SecretKey,
+		S3Bucket:                        os.Getenv("S3_BUCKET"),
 		ClickHouseHost:                  os.Getenv("CLICKHOUSE_HOST"),
 		ClickHousePort:                  os.Getenv("CLICKHOUSE_PORT"),
 		ClickHouseUser:                  os.Getenv("CLICKHOUSE_USER"),

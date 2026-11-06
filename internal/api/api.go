@@ -26,7 +26,7 @@ import (
 	"github.com/teomiscia/github-trending/internal/models"
 )
 
-func NewServer(cfg *config.Config, redisClient *redis.Client, pgdb *database.PostgresConnection, chdb *database.ClickHouseConnection, minioConnection *database.MinioConnection) *gin.Engine {
+func NewServer(cfg *config.Config, redisClient *redis.Client, pgdb *database.PostgresConnection, chdb *database.ClickHouseConnection, objectStore database.ObjectStore) *gin.Engine {
 	if !cfg.Debug {
 		gin.SetMode(gin.ReleaseMode)
 	}
@@ -43,7 +43,7 @@ func NewServer(cfg *config.Config, redisClient *redis.Client, pgdb *database.Pos
 
 	router.GET("/retrieveList", handleRetrieveList(cfg, redisClient, pgdb, chdb, homepageSnapshots))
 	router.POST("/trackOpenRepository", handleTrackOpenRepository(cfg, redisClient, pgdb))
-	router.GET("/getReadme", handleGetReadme(cfg, redisClient, minioConnection))
+	router.GET("/getReadme", handleGetReadme(cfg, redisClient, objectStore))
 	router.GET("/repository/:id", handleGetRepositoryDetails(cfg, redisClient, pgdb, chdb))
 	router.GET("/api/og", handleGenerateOGImage(cfg))
 
@@ -468,7 +468,7 @@ func handleTrackOpenRepository(cfg *config.Config, redisClient *redis.Client, pg
 	}
 }
 
-func handleGetReadme(cfg *config.Config, redisClient *redis.Client, minioConnection *database.MinioConnection) gin.HandlerFunc {
+func handleGetReadme(cfg *config.Config, redisClient *redis.Client, objectStore database.ObjectStore) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		repoID := c.Query("repoId")
 		if repoID == "" {
@@ -487,11 +487,11 @@ func handleGetReadme(cfg *config.Config, redisClient *redis.Client, minioConnect
 			}
 		}
 
-		// Construct the object name for MinIO
+		// Construct the object name in the README bucket
 		objectName := fmt.Sprintf("readmes/%s.md", repoID)
 
-		// Get the README content from MinIO
-		readmeContent, err := minioConnection.GetFile(context.Background(), objectName)
+		// Get the README content from the object store
+		readmeContent, err := objectStore.GetFile(c.Request.Context(), objectName)
 		if err != nil {
 			errorResponse(c, http.StatusNotFound, "README not found", err, cfg.Debug)
 			return

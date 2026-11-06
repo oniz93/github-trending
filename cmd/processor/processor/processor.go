@@ -16,7 +16,7 @@ import (
 	"github.com/teomiscia/github-trending/internal/models"
 )
 
-func RunProcessor(mqConnection messaging.MQConnection, minioConnection database.MinioClient, githubClient *github.GitHubClient, httpClient *http.Client, processQueueName, writeQueueName, readmeEmbedQueueName string) error {
+func RunProcessor(mqConnection messaging.MQConnection, objectStore database.ObjectStore, githubClient *github.GitHubClient, httpClient *http.Client, processQueueName, writeQueueName, readmeEmbedQueueName string) error {
 	msgs, err := mqConnection.Consume(processQueueName)
 	if err != nil {
 		return fmt.Errorf("failed to start consuming from queue %s: %w", processQueueName, err)
@@ -65,14 +65,14 @@ func RunProcessor(mqConnection messaging.MQConnection, minioConnection database.
 			} else {
 				objectName := fmt.Sprintf("readmes/%d.md", crawlResult.Repository.ID)
 				reader := bytes.NewReader(readmeContent)
-				_, err := minioConnection.UploadFile(context.Background(), objectName, reader, int64(len(readmeContent)), "text/markdown")
+				err := objectStore.UploadFile(context.Background(), objectName, reader, int64(len(readmeContent)), "text/markdown")
 				if err != nil {
-					log.Printf("Failed to upload README to MinIO for %s: %v", crawlResult.Repository.FullName, err)
+					log.Printf("Failed to upload README to object store for %s: %v", crawlResult.Repository.FullName, err)
 				} else {
 					// Publish message to readme_to_embed queue
 					embedMsg := models.ReadmeEmbedMessage{
 						RepositoryID: int64(crawlResult.Repository.ID),
-						MinioPath:    objectName,
+						ObjectPath:   objectName,
 						DownloadURL:  crawlResult.Repository.ReadmeURL.String,
 					}
 					embedMsgJSON, err := json.Marshal(embedMsg)

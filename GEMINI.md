@@ -13,7 +13,7 @@ The system is a microservices-based application designed to discover, analyze, a
 *   **`writer-service` (Go):** Consumes from the `repos_to_write` queue and writes the processed repository data to the PostgreSQL and ClickHouse databases.
 *   **`embedding-api-service` (Python/FastAPI):** A standalone API that exposes an endpoint (`/embed`) to generate sentence embeddings for a given text using a pre-trained SentenceTransformer model.
 *   **`embedding-autoscaler` (Go):** A smart proxy that sits in front of the `embedding-api-service`. It dynamically scales the number of `embedding-api-service` instances from 0 to a configured maximum based on request load. It also load-balances requests among the running instances.
-*   **`embedding-service` (Go):** Consumes from the `readme_to_embed` queue. It fetches the README content from MinIO, calls the `embedding-api-service` (via the autoscaler) to get the embedding, and stores the resulting vector in the Qdrant vector database.
+*   **`embedding-service` (Go):** Consumes from the `readme_to_embed` queue. It fetches the README content from the S3 object store (SeaweedFS), calls the `embedding-api-service` (via the autoscaler) to get the embedding, and stores the resulting vector in the Qdrant vector database.
 *   **`similarity-engine-service` (Go):** Periodically calculates similarity scores between repositories. It fetches embeddings from Qdrant, computes similarity, and stores the results in Redis for fast access.
 *   **`api-server` (Go):** The public-facing API for the application. It handles user requests, queries the databases (PostgreSQL, ClickHouse, Redis) to get trending and personalized repository data, and returns the results as JSON. It also keeps a precomputed trending homepage snapshot (top 200 repositories) in memory, Redis, and PostgreSQL, refreshed every `HOMEPAGE_SNAPSHOT_REFRESH_INTERVAL` (default `30m`). Sessions without personalization are served straight from that snapshot, so the first homepage load does not wait for the heavy ClickHouse growth query.
 *   **`web` (React Native/Expo):** A mobile and web application that provides a user interface for browsing trending repositories. It features a TikTok-style vertical scrolling feed and a detailed view with a rendered README.
@@ -27,7 +27,7 @@ The system is a microservices-based application designed to discover, analyze, a
 5.  `Processor` -> `repos_to_write` (RabbitMQ)
 6.  `repos_to_write` -> `Writer Service` -> `PostgreSQL` & `ClickHouse`
 7.  `Processor` -> `readme_to_embed` (RabbitMQ)
-8.  `readme_to_embed` -> `Embedding Service` -> `MinIO` & `Embedding API` -> `Qdrant`
+8.  `readme_to_embed` -> `Embedding Service` -> `SeaweedFS (S3)` & `Embedding API` -> `Qdrant`
 9.  `Similarity Engine` -> `Qdrant` & `PostgreSQL` -> `Redis`
 10. `API Server` -> `PostgreSQL`, `ClickHouse`, `Redis` -> `web` (User)
 
@@ -53,10 +53,11 @@ POSTGRES_USER=user
 POSTGRES_PASSWORD=password
 POSTGRES_DB=github_meta
 
-# MinIO Credentials
-MINIO_ROOT_USER=minioadmin
-MINIO_ROOT_PASSWORD=minioadmin
-MINIO_ENDPOINT=minio:9000
+# S3-compatible object store (SeaweedFS)
+S3_ENDPOINT=seaweedfs:8333
+S3_ACCESS_KEY=github-trending
+S3_SECRET_KEY=change-me
+S3_BUCKET=readmes
 
 # Clickhouse Credentials
 CLICKHOUSE_HOST=clickhouse
@@ -127,19 +128,16 @@ services:
       retries: 5
     command: postgres -c shared_preload_libraries=pg_stat_statements
 
-  minio:
-    image: minio/minio:latest
-    container_name: minio_storage
-    command: server /data --console-address ":9001"
-    ports:
-      - "9000:9000"
-      - "9001:9001"
-    env_file:
-      - ./.env
+  seaweedfs:
+    image: chrislusf/seaweedfs:4.52
+    command: server -dir=/data -s3 -s3.port=8333 -master.volumeSizeLimitMB=1024 -volume.max=0 -ip.bind=0.0.0.0
+    environment:
+      - AWS_ACCESS_KEY_ID=${S3_ACCESS_KEY}
+      - AWS_SECRET_ACCESS_KEY=${S3_SECRET_KEY}
     volumes:
-      - ./data/minio:/data
+      - ./data/seaweedfs:/data
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8333/healthz"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -220,7 +218,7 @@ services:
       replicas: 3
     depends_on:
       - rabbitmq
-      - minio
+      - seaweedfs
     env_file:
       - ./.env
 
@@ -247,7 +245,7 @@ services:
       - rabbitmq
       - postgres
       - clickhouse
-      - minio
+      - seaweedfs
       - redis
     env_file:
       - ./.env
@@ -260,7 +258,7 @@ services:
     depends_on:
       - rabbitmq
       - postgres
-      - minio
+      - seaweedfs
       - qdrant
     env_file:
       - ./.env

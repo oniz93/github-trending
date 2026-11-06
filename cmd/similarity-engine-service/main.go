@@ -157,7 +157,7 @@ func processRepository(repoID int64, qdrantConnection *database.QdrantConnection
 		// If the embedding is not found, send a message to the readme_to_embed queue
 		embedMsg := models.ReadmeEmbedMessage{
 			RepositoryID: repoID,
-			MinioPath:    fmt.Sprintf("readmes/%d.md", repoID),
+			ObjectPath:   fmt.Sprintf("readmes/%d.md", repoID),
 		}
 		embedMsgJSON, err := json.Marshal(embedMsg)
 		if err != nil {

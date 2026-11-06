@@ -61,20 +61,20 @@ func main() {
 		log.Fatalf("Failed to connect to ClickHouse after %d retries: %v", maxRetries, err)
 	}
 
-	var minioConnection *database.MinioConnection
+	var objectStore *database.S3Connection
 	for i := 0; i < maxRetries; i++ {
-		minioConnection, err = database.NewMinioConnection(cfg.MinioEndpoint, cfg.MinioRootUser, cfg.MinioRootPassword)
+		objectStore, err = database.NewS3Connection(cfg.S3Endpoint, cfg.S3AccessKey, cfg.S3SecretKey, cfg.S3Bucket)
 		if err == nil {
 			break
 		}
-		log.Printf("Failed to connect to MinIO: %v. Retrying in %v...", err, retryDelay)
+		log.Printf("Failed to connect to S3 object store: %v. Retrying in %v...", err, retryDelay)
 		time.Sleep(retryDelay)
 	}
 	if err != nil {
-		log.Fatalf("Failed to connect to MinIO after %d retries: %v", maxRetries, err)
+		log.Fatalf("Failed to connect to S3 object store after %d retries: %v", maxRetries, err)
 	}
 
-	server := api.NewServer(cfg, redisClient, postgresConnection, clickhouseConnection, minioConnection)
+	server := api.NewServer(cfg, redisClient, postgresConnection, clickhouseConnection, objectStore)
 
 	log.Println("API Server started. Listening on :8080")
 	log.Fatal(server.Run(":8080"))

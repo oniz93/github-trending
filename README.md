@@ -10,7 +10,7 @@ The system is designed as a decoupled, event-driven pipeline where specialized s
 *   **Event-Driven Pipeline**: 
     1.  **Discovery**: Identifies new or trending repositories and publishes to `repos_to_crawl`.
     2.  **Crawler**: Pulls metadata, tags, and languages, then publishes to `raw_data_to_process`.
-    3.  **Processor**: Downloads READMEs, stores them in **MinIO**, and triggers embedding generation via `readme_to_embed`.
+    3.  **Processor**: Downloads READMEs, stores them in the S3 object store (**SeaweedFS**), and triggers embedding generation via `readme_to_embed`.
     4.  **Writer**: Handles high-throughput writes to **PostgreSQL** and **ClickHouse**.
 *   **High-Efficiency Storage**: 
     *   **ClickHouse Integration**: Implements a custom **row-hashing mechanism** in Go to deduplicate time-series metric inserts, significantly reducing storage overhead while maintaining a granular history of repository growth.
@@ -29,7 +29,7 @@ The system is designed as a decoupled, event-driven pipeline where specialized s
 *   **Primary DB**: **PostgreSQL** – Relational storage for repository metadata.
 *   **Vector DB**: **Qdrant** – AI-powered semantic similarity search.
 *   **Caching**: **Redis** – Low-latency data retrieval for the API.
-*   **Object Storage**: **MinIO** – S3-compatible storage for READMEs and assets.
+*   **Object Storage**: **SeaweedFS** – S3-compatible storage for READMEs and assets (any S3-compatible store works via `S3_ENDPOINT`).
 *   **Observability**: **OpenTelemetry** – Distributed tracing and system telemetry.
 
 ## 📂 Microservices Overview
