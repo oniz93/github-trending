@@ -21,5 +21,23 @@ echo "--- Deploying stack: github-trending ---"
 #   record registry digests for them.
 docker stack deploy --resolve-image never -c docker-compose.yml github-trending
 
+echo "--- Rolling out rebuilt local images ---"
+# With --resolve-image never the service spec (github-trending/<svc>:latest)
+# does not change when an image is rebuilt, so Swarm keeps the old containers.
+# Force-update every locally built service whose containers are not running
+# the freshly built image.
+for svc in $(docker stack services github-trending --format '{{.Name}}'); do
+  image="$(docker service inspect "$svc" --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}')"
+  case "$image" in github-trending/*) ;; *) continue ;; esac
+  want="$(docker image inspect "${image%@*}" --format '{{.Id}}' 2>/dev/null)" || continue
+  for c in $(docker ps -q --filter "label=com.docker.swarm.service.name=$svc"); do
+    if [ "$(docker inspect "$c" --format '{{.Image}}')" != "$want" ]; then
+      echo "Updating $svc to the rebuilt image"
+      docker service update --quiet --detach --force "$svc" >/dev/null
+      break
+    fi
+  done
+done
+
 echo "--- Deployment status ---"
 docker stack services github-trending
