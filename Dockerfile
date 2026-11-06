@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.4
-FROM golang:1.21-alpine AS builder
+FROM golang:1.27-alpine AS builder
 
 # Set Go environment variables
 ENV GO111MODULE=on

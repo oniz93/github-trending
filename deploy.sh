@@ -4,7 +4,7 @@
 set -e
 
 echo "--- Building images ---"
-docker compose build
+docker compose build --pull
 
 # docker stack deploy does not interpolate variables from .env on its own.
 # Export the values used by docker-compose.yml without sourcing the whole file

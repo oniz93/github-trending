@@ -1,4 +1,4 @@
-FROM python:3.11-slim
+FROM python:3.14-slim
 
 # Install necessary build tools and dependencies
 # Using --no-install-recommends can help keep the image size down

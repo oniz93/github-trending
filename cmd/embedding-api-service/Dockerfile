@@ -1,4 +1,4 @@
-FROM python:3.11-slim
+FROM python:3.14-slim
 
 # Install necessary build tools and dependencies
 # Using --no-install-recommends can help keep the image size down
@@ -18,7 +18,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Install Python packages
 # It's good practice to upgrade pip first
 RUN pip install --no-cache-dir --upgrade pip
-RUN pip install --no-cache-dir scikit-learn gensim
 
 # Set the working directory in the container
 WORKDIR /app
