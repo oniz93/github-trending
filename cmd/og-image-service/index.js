@@ -113,6 +113,23 @@ async function renderCard(html) {
     }
 }
 
+// The CDP socket is long-lived and the browser side can close it whenever it likes
+// (idle timeout, obscura restart, a stalled shared volume). Without this, one dead
+// socket becomes a permanent 500 storm: seen live as TargetCloseError
+// "Protocol error (Target.createTarget): Target closed" on every later request.
+async function renderCardWithRetry(html) {
+    for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+            return await renderCard(html);
+        } catch (error) {
+            browserPromise = null;
+            connectingPromise = null;
+            if (attempt === 1) throw error;
+            console.warn(`render failed (${error.message}); reconnecting to obscura and retrying once`);
+        }
+    }
+}
+
 const cardCache = new Map();   // id -> { png, at }
 function cacheGet(id) {
     const hit = cardCache.get(id);
@@ -132,6 +149,7 @@ app.get('/health', async (req, res) => {
     try {
         const browser = await getBrowser();
         if (!isBrowserAlive(browser)) throw new Error('CDP connection lost');
+        await browser.version();   // real CDP round-trip: a dead socket fails here
         res.json({ ok: true, cached: cardCache.size, renders: activeRenders });
     } catch (error) {
         res.status(503).json({ ok: false, error: error.message });
@@ -171,7 +189,7 @@ app.get('/', async (req, res) => {
         let screenshot;
         await acquireSlot();
         try {
-            screenshot = await renderCard(html);
+            screenshot = await renderCardWithRetry(html);
         } finally {
             releaseSlot();
         }
