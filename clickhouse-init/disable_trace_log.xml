@@ -1,3 +1,12 @@
 <clickhouse>
-    <trace_log remove="1"/>
+    <!-- This file used to hold `<trace_log remove="1"/>`, which never worked:
+         ClickHouse's config parser does not read that attribute as a value, so
+         trace_log kept writing ~6.2M rows/day (~1.5 GiB, ~76 MiB/hour of merges)
+         onto the shared volume.
+
+         The switch that DOES work is turning the query profilers off, and profiles
+         are read from the USERS config — see clickhouse-init/profiler_off.xml,
+         mounted at /etc/clickhouse-server/users.d/profiler_off.xml.
+         Kept as a marker so the next person does not re-add a dead directive here.
+    -->
 </clickhouse>

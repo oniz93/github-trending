@@ -1,0 +1,17 @@
+<clickhouse>
+    <!-- Stop trace_log at the source.
+         trace_log only stores what the query profilers collect, so with
+         query_profiler_*_period_ns > 0 it grows forever (measured: 6.2M rows/day,
+         1.5 GiB, ~76 MiB/hour of merge writes on a volume shared with Elasticsearch).
+
+         Profiles are read from the USERS config (users.xml + users.d/*), not from
+         config.d/* — a <profiles> block placed in config.d is silently ignored,
+         which is why the old `<trace_log remove="1"/>` line in config.d never did
+         anything. user `teomiscia` runs with <profile>default</profile>. -->
+    <profiles>
+        <default>
+            <query_profiler_real_time_period_ns>0</query_profiler_real_time_period_ns>
+            <query_profiler_cpu_time_period_ns>0</query_profiler_cpu_time_period_ns>
+        </default>
+    </profiles>
+</clickhouse>
