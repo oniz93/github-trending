@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -19,6 +20,9 @@ const (
 	// You might want to make this configurable or more dynamic
 	defaultSearchQuery = "stars:>50"
 )
+
+// ErrGone means the repository was deleted, made private or blocked; retrying won't help.
+var ErrGone = errors.New("repository gone")
 
 // GitHubClient provides methods for interacting with the GitHub API.
 type GitHubClient struct {
@@ -223,7 +227,11 @@ func (c *GitHubClient) get(url string) ([]byte, error) {
 			time.Sleep(wait)
 			continue
 		}
-		if resp.StatusCode != http.StatusOK {
+		switch resp.StatusCode {
+		case http.StatusOK:
+		case http.StatusNotFound, http.StatusGone, http.StatusUnavailableForLegalReasons:
+			return nil, fmt.Errorf("%w: %s returned %d", ErrGone, url, resp.StatusCode)
+		default:
 			return nil, fmt.Errorf("GitHub API returned non-200 status for %s: %d - %s", url, resp.StatusCode, string(body))
 		}
 

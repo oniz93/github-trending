@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -102,12 +103,22 @@ func runCrawler(mqConnection messaging.MQConnection, dbConnection database.DBCon
 			repo.ReadmeURL = sql.NullString{Valid: false}
 		}
 		repo.Tags, err = githubClient.GetTags(repo.FullName)
+		if errors.Is(err, github.ErrGone) {
+			log.Printf("Dropping %s, repository is gone: %v", repo.FullName, err)
+			d.Ack(false)
+			continue
+		}
 		if err != nil {
 			log.Printf("Failed to get tags for %s: %v", repo.FullName, err)
 			d.Nack(false, true) // Requeue the message
 			continue
 		}
 		repo.Languages, err = githubClient.GetLanguages(repo.FullName)
+		if errors.Is(err, github.ErrGone) {
+			log.Printf("Dropping %s, repository is gone: %v", repo.FullName, err)
+			d.Ack(false)
+			continue
+		}
 		if err != nil {
 			log.Printf("Failed to get languages for %s: %v", repo.FullName, err)
 			d.Nack(false, true) // Requeue the message

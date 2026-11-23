@@ -1,7 +1,9 @@
 package github
 
 import (
+	"errors"
 	"net/http"
+	"net/http/httptest"
 	"strconv"
 	"testing"
 	"time"
@@ -38,5 +40,17 @@ func TestRateLimitWait(t *testing.T) {
 		if limited != c.wantLimited || wait < c.min || wait > c.max {
 			t.Errorf("%s: got (%v, %v), want limited=%v wait in [%v, %v]", c.name, wait, limited, c.wantLimited, c.min, c.max)
 		}
+	}
+}
+
+func TestGetReportsGoneRepos(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"message":"Not Found"}`, http.StatusNotFound)
+	}))
+	defer srv.Close()
+	c := NewGitHubClient("t", srv.Client())
+	c.SetBaseURL(srv.URL)
+	if _, err := c.GetTags("deleted/repo"); !errors.Is(err, ErrGone) {
+		t.Fatalf("got %v, want ErrGone", err)
 	}
 }
