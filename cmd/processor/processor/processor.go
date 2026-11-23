@@ -34,12 +34,14 @@ func RunProcessor(mqConnection messaging.MQConnection, objectStore database.Obje
 
 		log.Printf("Processing data for repository: %s", crawlResult.Repository.FullName)
 
-		// Get README URL
-		readmeURL, err := githubClient.GetReadme(crawlResult.Repository.FullName)
-		if err != nil {
-			log.Printf("Failed to get README for %s: %v", crawlResult.Repository.FullName, err)
-		} else {
-			crawlResult.Repository.ReadmeURL = sql.NullString{String: readmeURL, Valid: true}
+		// Ask the API only when the crawler's free raw.githubusercontent.com probe found nothing
+		if !crawlResult.Repository.ReadmeURL.Valid {
+			readmeURL, err := githubClient.GetReadme(crawlResult.Repository.FullName)
+			if err != nil {
+				log.Printf("Failed to get README for %s: %v", crawlResult.Repository.FullName, err)
+			} else {
+				crawlResult.Repository.ReadmeURL = sql.NullString{String: readmeURL, Valid: true}
+			}
 		}
 
 		// Publish to writer service to handle database inserts
